@@ -1,0 +1,537 @@
+// `@ai-sdk/anthropic`, `@ai-sdk/google`, `@ai-sdk/openai`, and
+// `@ai-sdk/openai-compatible` are loaded lazily inside `createProvider`.
+// Importing them statically would load every provider SDK at startup even
+// though only one provider is used per session. Types are erased at compile
+// time via `import type`, so they cost nothing at runtime.
+import type {AnthropicProvider} from '@ai-sdk/anthropic';
+import type {GoogleGenerativeAIProvider} from '@ai-sdk/google';
+import type {OpenAIProvider} from '@ai-sdk/openai';
+import type {OpenAICompatibleProvider} from '@ai-sdk/openai-compatible';
+import {
+	type Agent,
+	type RequestInit as UndiciRequestInit,
+	fetch as undiciFetch,
+} from 'undici';
+import {getValidCodexToken} from '@/auth/chatgpt-codex';
+import {
+	COPILOT_HEADERS,
+	getCopilotAccessToken,
+	getCopilotBaseUrl,
+} from '@/auth/github-copilot';
+import {
+	getCodexNoCredentialsMessage,
+	loadCodexCredential,
+	updateCodexCredential,
+} from '@/config/codex-credentials';
+import {
+	getCopilotNoCredentialsMessage,
+	loadCopilotCredential,
+} from '@/config/copilot-credentials';
+import type {AIProviderConfig} from '@/types/index';
+import {getLogger} from '@/utils/logging';
+import {isOpenRouterProvider} from './openrouter.js';
+import {isOrcaRouterProvider} from './orcarouter.js';
+import {isRequestyProvider} from './requesty.js';
+
+/**
+ * Discriminated union pairing each underlying SDK provider with its `kind`.
+ * Lets callers narrow the provider type via `kind` without `as unknown as`
+ * casts. The pairing is enforced by `createProvider`'s return value.
+ */
+export type TaggedProvider =
+	| {kind: 'chatgpt-codex'; provider: OpenAIProvider}
+	| {kind: 'github-copilot'; provider: OpenAIProvider}
+	| {
+			kind: 'openai-compatible';
+			provider: OpenAICompatibleProvider<string, string, string, string>;
+	  }
+	| {kind: 'anthropic'; provider: AnthropicProvider}
+	| {kind: 'google'; provider: GoogleGenerativeAIProvider};
+
+/**
+ * Wraps undici's fetch so requests flow through the shared Agent. The Agent
+ * carries TLS connect options (e.g. caCertPath), so any SDK provider given
+ * this fetch will honor the configured CA bundle, even Anthropic and Google,
+ * which would otherwise use the global fetch and bypass our TLS settings.
+ */
+export function createUndiciFetch(undiciAgent: Agent) {
+	return async (
+		url: string | URL | Request,
+		options?: RequestInit,
+	): Promise<Response> => {
+		const response = await undiciFetch(url as string | URL, {
+			...(options as UndiciRequestInit),
+			dispatcher: undiciAgent,
+		});
+
+		const contentType = response.headers.get('content-type') || '';
+		if (response.body && contentType.includes('text/event-stream')) {
+			const decoder = new TextDecoder('utf-8');
+			const encoder = new TextEncoder();
+			let buffer = '';
+
+			const transform = new TransformStream({
+				transform(chunk, controller) {
+					buffer += decoder.decode(chunk, {stream: true});
+
+					if (buffer.includes('data:  [DONE]')) {
+						buffer = buffer.replace(/data:\s\s\[DONE\]/g, 'data: [DONE]');
+					}
+
+					if (buffer.length > 13) {
+						const toEnqueue = buffer.slice(0, -13);
+						buffer = buffer.slice(-13);
+						controller.enqueue(encoder.encode(toEnqueue));
+					}
+				},
+				flush(controller) {
+					buffer += decoder.decode();
+					if (buffer.includes('data:  [DONE]')) {
+						buffer = buffer.replace(/data:\s\s\[DONE\]/g, 'data: [DONE]');
+					}
+					if (buffer.length > 0) {
+						controller.enqueue(encoder.encode(buffer));
+					}
+				},
+			});
+
+			return new Response(response.body.pipeThrough(transform), {
+				status: response.status,
+				statusText: response.statusText,
+				headers: response.headers,
+			}) as unknown as Response;
+		}
+
+		return response as unknown as Response;
+	};
+}
+
+type ResponsesStreamEvent = {
+	type?: unknown;
+	item_id?: unknown;
+	output_index?: unknown;
+	item?: {id?: unknown; type?: unknown};
+};
+
+const SEPARATOR_PATTERN = /\r\n\r\n|\n\n|\r\r/;
+const LINE_PATTERN = /\r\n|\n|\r/;
+
+export function createReasoningItemNormalizer(): TransformStream<
+	Uint8Array,
+	Uint8Array
+> {
+	const decoder = new TextDecoder('utf-8');
+	const encoder = new TextEncoder();
+	const announced = new Set<string>();
+	const announcedByIndex = new Map<number, string>();
+	let buffer = '';
+
+	const announce = (id: string, outputIndex: unknown): void => {
+		announced.add(id);
+		if (typeof outputIndex === 'number') {
+			announcedByIndex.set(outputIndex, id);
+		}
+	};
+
+	/**
+	 * Line endings and framing are whatever the proxy chose to send. The parser
+	 * downstream of us accepts LF, CRLF and lone CR, and ignores any `event:`
+	 * line in front of the payload, so this has to be at least as permissive, * anything it accepts that we reject is an event we silently fail to fix.
+	 */
+	const eolOf = (block: string, separator: string): string => {
+		if (separator.length > 0) {
+			return separator.slice(0, separator.length / 2);
+		}
+		if (block.includes('\r\n')) {
+			return '\r\n';
+		}
+		return block.includes('\r') ? '\r' : '\n';
+	};
+
+	/** Multiple `data:` lines in one block join with a newline, per the spec. */
+	const readData = (block: string): string | undefined => {
+		const parts = block
+			.split(LINE_PATTERN)
+			.filter(line => line.startsWith('data:'))
+			.map(line => line.slice(5));
+		return parts.length > 0 ? parts.join('\n').trim() : undefined;
+	};
+
+	/** Swaps the payload while leaving `event:`/`id:` lines and framing intact. */
+	const replaceData = (block: string, eol: string, value: unknown): string => {
+		const lines: string[] = [];
+		let written = false;
+		for (const line of block.split(LINE_PATTERN)) {
+			if (!line.startsWith('data:')) {
+				lines.push(line);
+				continue;
+			}
+			if (!written) {
+				lines.push(`data: ${JSON.stringify(value)}`);
+				written = true;
+			}
+		}
+		return lines.join(eol);
+	};
+
+	const rewrite = (block: string, separator: string): string => {
+		const payload = readData(block);
+		if (!payload || payload === '[DONE]') {
+			return block + separator;
+		}
+
+		let value: ResponsesStreamEvent;
+		try {
+			value = JSON.parse(payload) as ResponsesStreamEvent;
+		} catch {
+			return block + separator;
+		}
+
+		const item = value.item;
+		const reasoningItemId =
+			item?.type === 'reasoning' && typeof item.id === 'string'
+				? item.id
+				: undefined;
+		const summaryItemId =
+			typeof value.type === 'string' &&
+			value.type.startsWith('response.reasoning_summary') &&
+			typeof value.item_id === 'string'
+				? value.item_id
+				: undefined;
+
+		const itemId = reasoningItemId ?? summaryItemId;
+		if (itemId === undefined) {
+			return block + separator;
+		}
+
+		if (
+			reasoningItemId !== undefined &&
+			value.type === 'response.output_item.added'
+		) {
+			announce(itemId, value.output_index);
+			return block + separator;
+		}
+
+		if (announced.has(itemId)) {
+			return block + separator;
+		}
+
+		const outputIndex =
+			typeof value.output_index === 'number' ? value.output_index : undefined;
+		const eol = eolOf(block, separator);
+
+		const tracked =
+			outputIndex === undefined ? undefined : announcedByIndex.get(outputIndex);
+		if (tracked !== undefined) {
+			return (
+				replaceData(
+					block,
+					eol,
+					reasoningItemId !== undefined
+						? {...value, item: {...item, id: tracked}}
+						: {...value, item_id: tracked},
+				) + separator
+			);
+		}
+
+		// `output_index` is required by the SDK's schema, and a chunk that fails
+		// validation sets finishReason to 'error' rather than being skipped, a
+		// synthetic announcement without one would trade the crash for a broken
+		// response. Leave the event alone instead; guessing an index risks
+		// colliding with a real item.
+		if (outputIndex === undefined) {
+			return block + separator;
+		}
+
+		announce(itemId, outputIndex);
+		const added = `data: ${JSON.stringify({
+			type: 'response.output_item.added',
+			output_index: outputIndex,
+			item: {id: itemId, type: 'reasoning', encrypted_content: null},
+		})}`;
+		return added + (separator || eol + eol) + block + separator;
+	};
+
+	const drain = (
+		controller: TransformStreamDefaultController<Uint8Array>,
+	): void => {
+		let match = SEPARATOR_PATTERN.exec(buffer);
+		while (match !== null) {
+			const block = buffer.slice(0, match.index);
+			const separator = match[0];
+			buffer = buffer.slice(match.index + separator.length);
+			controller.enqueue(encoder.encode(rewrite(block, separator)));
+			match = SEPARATOR_PATTERN.exec(buffer);
+		}
+	};
+
+	return new TransformStream({
+		transform(chunk, controller) {
+			buffer += decoder.decode(chunk, {stream: true});
+			drain(controller);
+		},
+		flush(controller) {
+			buffer += decoder.decode();
+			drain(controller);
+			if (buffer.length > 0) {
+				const trailing = buffer;
+				buffer = '';
+				controller.enqueue(encoder.encode(rewrite(trailing, '')));
+			}
+		},
+	});
+}
+
+/**
+ * Creates an AI SDK provider based on the sdkProvider configuration.
+ * Defaults to 'openai-compatible' if not specified.
+ *
+ * Async because provider SDK packages are loaded lazily, only the one that
+ * matches the caller's `sdkProvider` is imported, so a session that only
+ * uses Anthropic never loads the Google or OpenAI packages.
+ */
+export async function createProvider(
+	providerConfig: AIProviderConfig,
+	undiciAgent: Agent,
+): Promise<TaggedProvider> {
+	const logger = getLogger();
+	const {config, sdkProvider} = providerConfig;
+
+	// Use explicit sdkProvider if set, otherwise default to 'openai-compatible'
+	if (sdkProvider === 'anthropic') {
+		logger.info('Using @ai-sdk/anthropic provider', {
+			provider: providerConfig.name,
+			sdkProvider,
+		});
+
+		const {createAnthropic} = await import('@ai-sdk/anthropic');
+		return {
+			kind: 'anthropic',
+			provider: createAnthropic({
+				baseURL: config.baseURL || undefined,
+				apiKey: config.apiKey ?? '',
+				headers: config.headers,
+				fetch: createUndiciFetch(undiciAgent),
+			}),
+		};
+	}
+
+	if (sdkProvider === 'google') {
+		logger.info('Using @ai-sdk/google provider', {
+			provider: providerConfig.name,
+			sdkProvider,
+		});
+
+		const {createGoogleGenerativeAI} = await import('@ai-sdk/google');
+		return {
+			kind: 'google',
+			provider: createGoogleGenerativeAI({
+				apiKey: config.apiKey ?? '',
+				fetch: createUndiciFetch(undiciAgent),
+			}),
+		};
+	}
+
+	if (sdkProvider === 'github-copilot') {
+		logger.info('Using GitHub Copilot subscription provider', {
+			provider: providerConfig.name,
+		});
+
+		const credential = loadCopilotCredential(providerConfig.name);
+		if (!credential) {
+			throw new Error(getCopilotNoCredentialsMessage(providerConfig.name));
+		}
+
+		const domain = credential.enterpriseUrl ?? 'github.com';
+		const baseURL = config.baseURL?.trim() || getCopilotBaseUrl(domain);
+
+		const copilotFetch = async (
+			input: string | URL | Request,
+			init?: RequestInit,
+		): Promise<Response> => {
+			const {token} = await getCopilotAccessToken(
+				credential.oauthToken,
+				domain,
+			);
+
+			// Build headers via Headers (case-insensitive) to avoid
+			// duplicate keys when merging SDK lowercase and Copilot mixed-case.
+			const h = new Headers();
+			if (init?.headers) {
+				const src =
+					init.headers instanceof Headers
+						? init.headers
+						: new Headers(
+								init.headers as ConstructorParameters<typeof Headers>[0],
+							);
+				src.forEach((v, k) => {
+					if (k !== 'authorization') {
+						h.set(k, v);
+					}
+				});
+			}
+			for (const [k, v] of Object.entries(COPILOT_HEADERS)) {
+				h.set(k, v);
+			}
+			h.set('Authorization', `Bearer ${token}`);
+			h.set('Openai-Intent', 'conversation-edits');
+			h.set('X-Initiator', 'agent');
+
+			// Convert to plain object for undici
+			const headers: Record<string, string> = {};
+			h.forEach((v, k) => {
+				headers[k] = v;
+			});
+
+			const response = (await undiciFetch(input as string | URL, {
+				method: init?.method,
+				body: init?.body as UndiciRequestInit['body'],
+				signal: init?.signal,
+				headers,
+				dispatcher: undiciAgent,
+			})) as unknown as Response;
+
+			const contentType = response.headers.get('content-type') || '';
+			if (response.body && contentType.includes('text/event-stream')) {
+				return new Response(
+					response.body.pipeThrough(createReasoningItemNormalizer()),
+					{
+						status: response.status,
+						statusText: response.statusText,
+						headers: response.headers,
+					},
+				) as unknown as Response;
+			}
+
+			return response;
+		};
+
+		const {createOpenAI} = await import('@ai-sdk/openai');
+		return {
+			kind: 'github-copilot',
+			provider: createOpenAI({
+				baseURL,
+				// Empty key, auth is handled entirely by copilotFetch's Authorization header
+				apiKey: '',
+				fetch: copilotFetch,
+				headers: config.headers ?? {},
+			}),
+		};
+	}
+
+	if (sdkProvider === 'chatgpt-codex') {
+		logger.info('Using ChatGPT/Codex subscription provider', {
+			provider: providerConfig.name,
+		});
+
+		const credential = loadCodexCredential(providerConfig.name);
+		if (!credential) {
+			throw new Error(getCodexNoCredentialsMessage(providerConfig.name));
+		}
+
+		const baseURL =
+			config.baseURL?.trim() || 'https://chatgpt.com/backend-api/codex';
+
+		const codexFetch = async (
+			input: string | URL | Request,
+			init?: RequestInit,
+		): Promise<Response> => {
+			// Get valid token (refreshing if needed)
+			const {accessToken, accountId} = await getValidCodexToken(
+				credential,
+				tokens => {
+					updateCodexCredential(providerConfig.name, tokens);
+				},
+			);
+
+			const h = new Headers();
+			if (init?.headers) {
+				const src =
+					init.headers instanceof Headers
+						? init.headers
+						: new Headers(
+								init.headers as ConstructorParameters<typeof Headers>[0],
+							);
+				src.forEach((v, k) => {
+					if (k !== 'authorization') {
+						h.set(k, v);
+					}
+				});
+			}
+			h.set('Authorization', `Bearer ${accessToken}`);
+			h.set('ChatGPT-Account-Id', accountId);
+			h.set('originator', 'codex_cli_rs');
+
+			// Convert to plain object for undici
+			const headers: Record<string, string> = {};
+			h.forEach((v, k) => {
+				headers[k] = v;
+			});
+
+			// Codex backend requires store: false on every request.
+			// Patch the JSON body to ensure the backend accepts it.
+			let body = init?.body;
+			if (body && typeof body === 'string') {
+				try {
+					const parsed = JSON.parse(body) as Record<string, unknown>;
+					parsed.store = false;
+					body = JSON.stringify(parsed);
+				} catch {
+					// Not JSON, pass through
+				}
+			}
+
+			return undiciFetch(input as string | URL, {
+				method: init?.method,
+				body: body as UndiciRequestInit['body'],
+				signal: init?.signal,
+				headers,
+				dispatcher: undiciAgent,
+			}) as Promise<Response>;
+		};
+
+		const {createOpenAI} = await import('@ai-sdk/openai');
+		return {
+			kind: 'chatgpt-codex',
+			provider: createOpenAI({
+				baseURL,
+				apiKey: '',
+				fetch: codexFetch,
+				headers: config.headers ?? {},
+			}),
+		};
+	}
+
+	// Add OpenRouter-specific headers for app attribution
+	const headers: Record<string, string> = config.headers ?? {};
+	if (isOpenRouterProvider(providerConfig.name)) {
+		headers['HTTP-Referer'] = 'https://github.com/pdm-local/pdm_code';
+		headers['X-Title'] = 'PDM Code';
+	}
+
+	// Requesty (https://requesty.ai) is an OpenAI-compatible router and uses
+	// the same app-attribution headers as OpenRouter.
+	if (isRequestyProvider(providerConfig.name)) {
+		headers['HTTP-Referer'] = 'https://github.com/pdm-local/pdm_code';
+		headers['X-Title'] = 'PDM Code';
+	}
+
+	// OrcaRouter (https://www.orcarouter.ai) is an OpenAI-compatible router and
+	// uses the same app-attribution headers as OpenRouter.
+	if (isOrcaRouterProvider(providerConfig.name)) {
+		headers['HTTP-Referer'] = 'https://github.com/pdm-local/pdm_code';
+		headers['X-Title'] = 'PDM Code';
+	}
+
+	const {createOpenAICompatible} = await import('@ai-sdk/openai-compatible');
+	return {
+		kind: 'openai-compatible',
+		provider: createOpenAICompatible({
+			name: providerConfig.name,
+			baseURL: config.baseURL ?? '',
+			apiKey: config.apiKey ?? 'dummy-key',
+			fetch: createUndiciFetch(undiciAgent),
+			headers,
+		}),
+	};
+}

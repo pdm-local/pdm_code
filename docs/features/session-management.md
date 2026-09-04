@@ -1,0 +1,104 @@
+---
+title: "Session Management"
+description: "Save and resume chat conversations automatically"
+sidebar_order: 7
+---
+
+# Session Management
+
+PDM Code automatically saves your conversations so you can close the terminal and pick up where you left off. Sessions are saved in the background, you don't need to do anything special.
+
+## Resuming a Session
+
+```bash
+/resume         # browse recent sessions with an interactive selector
+/resume last    # jump straight into the most recent session
+/resume {id}    # resume a specific session by ID
+/resume {n}     # resume by list index number
+```
+
+You can also use the aliases `/sessions` or `/history`.
+
+### From the Command Line
+
+You can resume a session directly at launch instead of using a slash command:
+
+```bash
+pdm --continue      # resume the most recent session for this directory (-c)
+pdm --resume        # open the session picker at startup (-r)
+pdm --resume last   # jump straight into the most recent session
+pdm --resume {id}   # resume a specific session by ID or list index
+```
+
+`--continue` silently starts a fresh session if no previous session exists for the current directory, while `--resume` exits with an error if the requested session is not found. The two flags are mutually exclusive, and both are interactive-only, they cannot be combined with `run`. See the [CLI Options Reference](../getting-started/index.md#cli-options) for the full flag list.
+
+## Renaming a Session
+
+```bash
+/rename <new name>    # rename the current session
+```
+
+The new name must be non-empty and **100 characters or less**. If the name exceeds this limit, an error message is displayed in chat.
+
+## What Gets Saved
+
+Each session captures:
+
+- Full conversation history (all messages)
+- Provider and model used
+- Working directory
+- Timestamps and message count
+- Its artifacts: the implementation plan, the task list, and the completion walkthrough
+
+Sessions are saved every 30 seconds by default and retained for 30 days.
+
+## Storage Location
+
+Sessions are stored in the platform-specific app data directory:
+
+| Platform | Default Path |
+|----------|-------------|
+| macOS | `~/Library/Application Support/pdm/sessions/` |
+| Linux | `~/.local/share/pdm/sessions/` |
+| Windows | `%APPDATA%/pdm/sessions/` |
+
+This can be overridden via the `directory` config option or `PDM_DATA_DIR` environment variable.
+
+### Session Artifacts
+
+Alongside `sessions/`, each session gets an `artifacts/<session id>/` directory holding the files behind the **Plan**, **Tasks**, and **Walkthrough** shortcuts above the prompt. They are written with owner-only permissions and never placed in your project directory.
+
+- Resuming a session restores its artifact shortcuts
+- Deleting a session, or letting retention expire it, deletes its artifacts too
+- Directories belonging to sessions that were never saved, because `autoSave` is off, or because `/clear` retired the session id, are swept at startup once they are more than a day old
+- `pdm --plain` runs get a session for the duration of the run and delete their artifacts on exit, so headless runs leave nothing behind
+
+See [Development Modes](development-modes.md) for how the artifacts are produced and [Task Management](task-management.md) for the task list specifically.
+
+## Configuration
+
+Customize session behaviour in your `agents.config.json`:
+
+```json
+{
+  "pdm": {
+    "sessions": {
+      "autoSave": true,
+      "saveInterval": 30000,
+      "maxSessions": 100,
+      "maxMessages": 1000,
+      "retentionDays": 30,
+      "directory": ""
+    }
+  }
+}
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `autoSave` | `true` | Enable/disable automatic saving |
+| `saveInterval` | `30000` | Milliseconds between saves (minimum 1000) |
+| `maxSessions` | `100` | Maximum sessions to keep (minimum 1) |
+| `maxMessages` | `1000` | Maximum messages sent to the model (context window capping), on-disk history is NOT truncated (minimum 1) |
+| `retentionDays` | `30` | Auto-delete sessions older than this (minimum 1) |
+| `directory` | (platform default) | Custom storage directory |

@@ -1,0 +1,753 @@
+/**
+ * Git Utilities
+ *
+ * Shared utilities for git operations including command execution,
+ * status parsing, and availability checks.
+ */
+
+import {execSync, spawn} from 'node:child_process';
+import {existsSync, readFileSync} from 'node:fs';
+import {isAbsolute, join} from 'node:path';
+import {getLogger} from '@/utils/logging';
+
+const logger = getLogger();
+
+/**
+ * File change status from git
+ */
+export type FileChangeStatus =
+	| 'added'
+	| 'modified'
+	| 'deleted'
+	| 'renamed'
+	| 'copied';
+
+/**
+ * Represents a single file change
+ */
+export interface FileChange {
+	path: string;
+	status: FileChangeStatus;
+	oldPath?: string;
+	additions: number;
+	deletions: number;
+	isBinary: boolean;
+}
+
+/**
+ * Commit information
+ */
+export interface CommitInfo {
+	hash: string;
+	shortHash: string;
+	author: string;
+	email: string;
+	date: string;
+	relativeDate: string;
+	subject: string;
+	body: string;
+	filesChanged?: number;
+}
+
+// ============================================================================
+// Availability Checks (Synchronous - for conditional tool registration)
+// ============================================================================
+
+/**
+ * Is `name` an executable on PATH?
+ *
+ * Used instead of spawning `<name> --version`: these checks only ask whether
+ * the binary is present, and a subprocess spawn is orders of magnitude more
+ * expensive than a stat, `gh` in particular is a cold Go binary that costs
+ * 30-80ms to start. A binary that exists but is broken fails later at call
+ * time with a clear error, exactly as it would have with a version probe.
+ */
+function isBinaryOnPath(name: string): boolean {
+	const pathValue = process.env.PATH;
+	if (!pathValue) return false;
+
+	// On Windows the executable carries an extension; PATHEXT lists which.
+	const extensions =
+		process.platform === 'win32'
+			? (process.env.PATHEXT ?? '.EXE;.CMD;.BAT;.COM').split(';')
+			: [''];
+
+	for (const dir of pathValue.split(process.platform === 'win32' ? ';' : ':')) {
+		if (!dir) continue;
+		for (const extension of extensions) {
+			if (existsSync(join(dir, `${name}${extension.toLowerCase()}`))) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+// Probe results are memoized: they were previously re-run on every call, and
+// `getGitTools()` alone triggers all three. Neither git's presence nor the
+// repo's identity changes within a session.
+let gitAvailableCache: boolean | undefined;
+let insideGitRepoCache: boolean | undefined;
+let ghAvailableCache: boolean | undefined;
+
+/** Exposed for tests, which need to re-probe after changing cwd or PATH. */
+export function resetGitAvailabilityCache(): void {
+	gitAvailableCache = undefined;
+	insideGitRepoCache = undefined;
+	ghAvailableCache = undefined;
+}
+
+/**
+ * Check if git is available on the system (synchronous)
+ */
+export function isGitAvailable(): boolean {
+	gitAvailableCache ??= isBinaryOnPath('git');
+	return gitAvailableCache;
+}
+
+/**
+ * Check if the current directory is inside a git repository (synchronous)
+ *
+ * Still asks git itself rather than walking up for a `.git` entry: worktrees,
+ * `GIT_DIR`, and bare repos all make that walk subtly wrong, and unlike the
+ * presence checks above there is no cheap equivalent that is also correct.
+ */
+export function isInsideGitRepo(): boolean {
+	if (insideGitRepoCache === undefined) {
+		try {
+			execSync('git rev-parse --is-inside-work-tree', {stdio: 'ignore'});
+			insideGitRepoCache = true;
+		} catch {
+			insideGitRepoCache = false;
+		}
+	}
+	return insideGitRepoCache;
+}
+
+/**
+ * Check if gh CLI is available on the system (synchronous)
+ */
+export function isGhAvailable(): boolean {
+	ghAvailableCache ??= isBinaryOnPath('gh');
+	return ghAvailableCache;
+}
+
+// ============================================================================
+// Synchronous Branch Helpers (safe to call from Ink <Static> render path)
+// ============================================================================
+
+/**
+ * Summary of git branch state used by the boot summary and /status panel.
+ */
+export interface GitStatusSummary {
+	branch: string;
+	isDefault: boolean;
+	detached: boolean;
+}
+
+/**
+ * Locate the .git directory for the current working directory by walking up
+ * the filesystem. Returns null when not inside a git repository. Synchronous.
+ *
+ * Also resolves the gitdir indirection used by git worktrees, where `.git`
+ * is a file containing `gitdir: <path>` rather than a directory.
+ */
+function findGitDirSync(startDir: string = process.cwd()): string | null {
+	let dir = startDir;
+	while (true) {
+		const candidate = join(dir, '.git');
+		if (existsSync(candidate)) {
+			try {
+				const stat = readFileSync(candidate, 'utf8');
+				const match = stat.match(/^gitdir:\s*(.+)\s*$/m);
+				if (match) {
+					const resolved = isAbsolute(match[1])
+						? match[1]
+						: join(dir, match[1]);
+					return resolved;
+				}
+			} catch {
+				// Not a file, assume it's the directory itself.
+			}
+			return candidate;
+		}
+		const parent = join(dir, '..');
+		if (parent === dir) return null;
+		dir = parent;
+	}
+}
+
+/**
+ * Read the current branch name synchronously by parsing .git/HEAD.
+ * Returns null when not in a repo or HEAD can't be read.
+ * When HEAD is detached, returns a short SHA prefix.
+ *
+ * `startDir` is exposed for tests that want to point at a fixture directory
+ * without relying on `process.chdir` (which is racy with parallel tests and
+ * fails when `os.tmpdir()` happens to live inside the working tree).
+ */
+export function getCurrentBranchSync(
+	startDir: string = process.cwd(),
+): {branch: string; detached: boolean} | null {
+	const gitDir = findGitDirSync(startDir);
+	if (!gitDir) return null;
+	try {
+		const head = readFileSync(join(gitDir, 'HEAD'), 'utf8').trim();
+		const refMatch = head.match(/^ref:\s*refs\/heads\/(.+)$/);
+		if (refMatch) {
+			return {branch: refMatch[1], detached: false};
+		}
+		// Bare SHA = detached HEAD
+		return {branch: head.slice(0, 7), detached: true};
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Resolve the default branch synchronously. Prefers
+ * `.git/refs/remotes/origin/HEAD` (a symbolic ref), checking both the loose
+ * file and `packed-refs`, since fresh clones often pack origin/HEAD. Falls
+ * back to whether `main` or `master` exists in `.git/refs/heads/` or
+ * `packed-refs`. Returns null when nothing can be resolved.
+ */
+export function getDefaultBranchSync(
+	startDir: string = process.cwd(),
+): string | null {
+	const gitDir = findGitDirSync(startDir);
+	if (!gitDir) return null;
+
+	try {
+		const originHead = join(gitDir, 'refs', 'remotes', 'origin', 'HEAD');
+		if (existsSync(originHead)) {
+			const contents = readFileSync(originHead, 'utf8').trim();
+			const match = contents.match(/^ref:\s*refs\/remotes\/origin\/(.+)$/);
+			if (match) return match[1];
+		}
+	} catch {
+		// fall through
+	}
+
+	let packedContents: string | null = null;
+	try {
+		const packed = join(gitDir, 'packed-refs');
+		if (existsSync(packed)) {
+			packedContents = readFileSync(packed, 'utf8');
+		}
+	} catch {
+		// ignore
+	}
+
+	// origin/HEAD is often packed (e.g. after a fresh clone).
+	if (packedContents) {
+		const packedOriginHead = packedContents.match(
+			/^#\s*ref:\s*refs\/remotes\/origin\/(.+)$/m,
+		);
+		if (packedOriginHead) return packedOriginHead[1];
+	}
+
+	const headsDir = join(gitDir, 'refs', 'heads');
+	for (const candidate of ['main', 'master']) {
+		if (existsSync(join(headsDir, candidate))) return candidate;
+	}
+
+	if (packedContents) {
+		for (const candidate of ['main', 'master']) {
+			if (packedContents.includes(` refs/heads/${candidate}`)) return candidate;
+		}
+	}
+
+	return null;
+}
+
+/**
+ * Resolve a {@link GitStatusSummary} synchronously by reading the `.git`
+ * filesystem directly, no child processes, safe to call from Ink's
+ * `<Static>` render path. Returns null when not in a git repository so
+ * callers can cleanly omit the surface.
+ *
+ * Skips the `isInsideGitRepo()` shell-out: `getCurrentBranchSync` already
+ * returns null whenever no `.git` directory is found, which is the same
+ * signal at zero process-spawn cost.
+ */
+export function getGitStatusSummarySync(
+	startDir: string = process.cwd(),
+): GitStatusSummary | null {
+	const current = getCurrentBranchSync(startDir);
+	if (!current) return null;
+	const defaultBranch = getDefaultBranchSync(startDir);
+	return {
+		branch: current.branch,
+		detached: current.detached,
+		isDefault: !current.detached && current.branch === defaultBranch,
+	};
+}
+
+/**
+ * Format a {@link GitStatusSummary} as a short suffix-marker label.
+ * Shared by the boot summary and the `/status` panel so the two surfaces
+ * can't drift on wording.
+ */
+export function formatGitStatusSummary(status: GitStatusSummary): {
+	branch: string;
+	marker: string | null;
+} {
+	if (status.detached) return {branch: status.branch, marker: 'detached'};
+	if (status.isDefault) return {branch: status.branch, marker: 'default'};
+	return {branch: status.branch, marker: null};
+}
+
+// ============================================================================
+// Git Command Execution
+// ============================================================================
+
+/**
+ * Spawn a command, collect stdout, and resolve with the trimmed output.
+ * Rejects with stderr (or an exit-code message) on non-zero exit. `label` is
+ * the human-readable command name used in error messages (e.g. 'Git', 'gh').
+ */
+function execProcess(
+	command: string,
+	args: string[],
+	label: string,
+): Promise<string> {
+	return new Promise((resolve, reject) => {
+		const proc = spawn(command, args);
+		let stdout = '';
+		let stderr = '';
+
+		proc.stdout.on('data', (data: Buffer) => {
+			stdout += data.toString();
+		});
+
+		proc.stderr.on('data', (data: Buffer) => {
+			stderr += data.toString();
+		});
+
+		proc.on('close', (code: number | null) => {
+			if (code === 0) {
+				resolve(stdout.trimEnd());
+			} else {
+				const errorMessage =
+					stderr.trim() || `${label} command failed with exit code ${code}`;
+				reject(new Error(errorMessage));
+			}
+		});
+
+		proc.on('error', error => {
+			reject(new Error(`Failed to execute ${command}: ${error.message}`));
+		});
+	});
+}
+
+/**
+ * Execute a git command and return the output
+ */
+export async function execGit(args: string[]): Promise<string> {
+	return execProcess('git', args, 'Git');
+}
+
+/**
+ * Execute a gh CLI command and return the output
+ */
+export async function execGh(args: string[]): Promise<string> {
+	return execProcess('gh', args, 'gh');
+}
+
+// ============================================================================
+// Repository State Checks
+// ============================================================================
+
+/**
+ * Check if there are staged changes
+ */
+export async function hasStagedChanges(): Promise<boolean> {
+	try {
+		const diff = await execGit(['diff', '--cached', '--name-only']);
+		return diff.trim().length > 0;
+	} catch (error) {
+		logger.debug('Failed to check for staged changes', {error});
+		return false;
+	}
+}
+
+/**
+ * Check if a rebase is in progress
+ */
+export async function isRebaseInProgress(): Promise<boolean> {
+	try {
+		await execGit(['rev-parse', '--git-path', 'rebase-merge']);
+		const result = await execGit([
+			'rev-parse',
+			'--verify',
+			'--quiet',
+			'REBASE_HEAD',
+		]);
+		return result !== '';
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Check if a merge is in progress
+ */
+export async function isMergeInProgress(): Promise<boolean> {
+	try {
+		await execGit(['rev-parse', '--verify', '--quiet', 'MERGE_HEAD']);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+// ============================================================================
+// Branch Operations
+// ============================================================================
+
+/**
+ * Get the current branch name
+ */
+export async function getCurrentBranch(): Promise<string> {
+	try {
+		return await execGit(['rev-parse', '--abbrev-ref', 'HEAD']);
+	} catch (error) {
+		logger.debug('Failed to get current branch', {error});
+		return 'HEAD'; // Detached HEAD state
+	}
+}
+
+/**
+ * Get the default branch (main or master)
+ */
+export async function getDefaultBranch(): Promise<string> {
+	try {
+		const remoteBranch = await execGit([
+			'symbolic-ref',
+			'refs/remotes/origin/HEAD',
+			'--short',
+		]);
+		return remoteBranch.replace('origin/', '');
+	} catch (error) {
+		logger.debug(
+			'Failed to resolve origin/HEAD, falling back to branch name detection',
+			{error},
+		);
+		// Fall back to checking if main or master exists
+		try {
+			await execGit(['rev-parse', '--verify', 'main']);
+			return 'main';
+		} catch {
+			try {
+				await execGit(['rev-parse', '--verify', 'master']);
+				return 'master';
+			} catch {
+				return 'main';
+			}
+		}
+	}
+}
+
+/**
+ * Get the upstream branch for the current branch
+ */
+export async function getUpstreamBranch(): Promise<string | null> {
+	try {
+		return await execGit(['rev-parse', '--abbrev-ref', '@{upstream}']);
+	} catch (error) {
+		logger.debug('Failed to get upstream branch', {error});
+		return null;
+	}
+}
+
+/**
+ * Get ahead/behind counts relative to upstream
+ */
+export async function getAheadBehind(): Promise<{
+	ahead: number;
+	behind: number;
+}> {
+	try {
+		const upstream = await getUpstreamBranch();
+		if (!upstream) return {ahead: 0, behind: 0};
+
+		const result = await execGit([
+			'rev-list',
+			'--left-right',
+			'--count',
+			`${upstream}...HEAD`,
+		]);
+		const [behind, ahead] = result.split('\t').map(n => parseInt(n, 10) || 0);
+		return {ahead, behind};
+	} catch (error) {
+		logger.debug('Failed to get ahead/behind counts', {error});
+		return {ahead: 0, behind: 0};
+	}
+}
+
+// ============================================================================
+// Commit Operations
+// ============================================================================
+
+/**
+ * Check if the last commit has been pushed
+ */
+export async function isLastCommitPushed(): Promise<boolean> {
+	try {
+		const upstream = await getUpstreamBranch();
+		if (!upstream) return false;
+
+		const {ahead} = await getAheadBehind();
+		return ahead === 0;
+	} catch (error) {
+		logger.debug('Failed to check if last commit is pushed', {error});
+		return false;
+	}
+}
+
+/**
+ * Get commits with various filters
+ */
+export async function getCommits(options: {
+	count?: number;
+	range?: string;
+	file?: string;
+	author?: string;
+	since?: string;
+	grep?: string;
+}): Promise<CommitInfo[]> {
+	try {
+		const args = ['log', '--format=%H|%h|%an|%ae|%ad|%ar|%s', '--date=short'];
+
+		if (options.count) args.push(`-n`, options.count.toString());
+		if (options.range) args.push(options.range);
+		if (options.author) args.push(`--author=${options.author}`);
+		if (options.since) args.push(`--since=${options.since}`);
+		if (options.grep) args.push(`--grep=${options.grep}`);
+		if (options.file) args.push('--', options.file);
+
+		const output = await execGit(args);
+		if (!output.trim()) return [];
+
+		return output.split('\n').map(line => {
+			const [hash, shortHash, author, email, date, relativeDate, subject] =
+				line.split('|');
+			return {
+				hash: hash || '',
+				shortHash: shortHash || '',
+				author: author || '',
+				email: email || '',
+				date: date || '',
+				relativeDate: relativeDate || '',
+				subject: subject || '',
+				body: '',
+			};
+		});
+	} catch (error) {
+		logger.debug('Failed to get commits', {error});
+		return [];
+	}
+}
+
+// ============================================================================
+// Status Parsing
+// ============================================================================
+
+/**
+ * Map git status character to FileChangeStatus
+ */
+function mapStatusChar(char: string): FileChangeStatus {
+	switch (char) {
+		case 'A':
+			return 'added';
+		case 'D':
+			return 'deleted';
+		case 'R':
+			return 'renamed';
+		case 'C':
+			return 'copied';
+		case 'M':
+		default:
+			return 'modified';
+	}
+}
+
+/**
+ * Parse git status --porcelain output
+ */
+export function parseGitStatus(statusOutput: string): {
+	staged: FileChange[];
+	unstaged: FileChange[];
+	untracked: string[];
+	conflicts: string[];
+} {
+	const staged: FileChange[] = [];
+	const unstaged: FileChange[] = [];
+	const untracked: string[] = [];
+	const conflicts: string[] = [];
+
+	const lines = statusOutput.split('\n').filter(line => line);
+
+	for (const line of lines) {
+		if (line.length < 3) continue;
+
+		const indexStatus = line[0];
+		const workTreeStatus = line[1];
+		const path = line.slice(3);
+
+		// Detect conflicts
+		if (
+			indexStatus === 'U' ||
+			workTreeStatus === 'U' ||
+			(indexStatus === 'A' && workTreeStatus === 'A') ||
+			(indexStatus === 'D' && workTreeStatus === 'D')
+		) {
+			conflicts.push(path);
+			continue;
+		}
+
+		// Untracked files
+		if (indexStatus === '?' && workTreeStatus === '?') {
+			untracked.push(path);
+			continue;
+		}
+
+		// Staged changes
+		if (indexStatus !== ' ' && indexStatus !== '?') {
+			staged.push({
+				path,
+				status: mapStatusChar(indexStatus),
+				additions: 0,
+				deletions: 0,
+				isBinary: false,
+			});
+		}
+
+		// Unstaged changes
+		if (workTreeStatus !== ' ' && workTreeStatus !== '?') {
+			unstaged.push({
+				path,
+				status: mapStatusChar(workTreeStatus),
+				additions: 0,
+				deletions: 0,
+				isBinary: false,
+			});
+		}
+	}
+
+	return {staged, unstaged, untracked, conflicts};
+}
+
+/**
+ * Get diff stats for files (additions/deletions)
+ */
+export async function getDiffStats(
+	staged: boolean = false,
+): Promise<Map<string, {additions: number; deletions: number}>> {
+	const stats = new Map<string, {additions: number; deletions: number}>();
+
+	try {
+		const args = ['diff', '--numstat'];
+		if (staged) args.push('--cached');
+
+		const output = await execGit(args);
+		if (!output.trim()) return stats;
+
+		for (const line of output.split('\n')) {
+			const parts = line.split('\t');
+			if (parts.length >= 3) {
+				const additions = parts[0] === '-' ? 0 : parseInt(parts[0], 10) || 0;
+				const deletions = parts[1] === '-' ? 0 : parseInt(parts[1], 10) || 0;
+				const path = parts[2];
+				stats.set(path, {additions, deletions});
+			}
+		}
+	} catch (error) {
+		logger.debug('Failed to get diff stats', {error});
+	}
+
+	return stats;
+}
+
+// ============================================================================
+// Stash Operations
+// ============================================================================
+
+/**
+ * Get stash count
+ */
+export async function getStashCount(): Promise<number> {
+	try {
+		const output = await execGit(['stash', 'list']);
+		if (!output.trim()) return 0;
+		return output.split('\n').length;
+	} catch (error) {
+		logger.debug('Failed to get stash count', {error});
+		return 0;
+	}
+}
+
+// ============================================================================
+// Diff Output Helpers
+// ============================================================================
+
+/**
+ * Truncate diff output if too long while preserving both ends of the diff.
+ * The beginning usually contains the file headers and the end often contains
+ * the final hunks, so keeping both gives the caller useful context without
+ * returning the entire result.
+ */
+export function truncateDiff(
+	diff: string,
+	maxLines: number = 500,
+): {
+	content: string;
+	truncated: boolean;
+	totalLines: number;
+} {
+	const lines = diff.split('\n');
+	const totalLines = lines.length;
+
+	if (totalLines <= maxLines) {
+		return {content: diff, truncated: false, totalLines};
+	}
+
+	const headLines = Math.ceil(maxLines / 2);
+	const tailLines = Math.floor(maxLines / 2);
+	const omittedLines = totalLines - headLines - tailLines;
+	const head = lines.slice(0, headLines).join('\n');
+	const tail = tailLines > 0 ? lines.slice(-tailLines).join('\n') : '';
+	const marker =
+		`... [Diff truncated: showing first ${headLines} and last ${tailLines} ` +
+		`of ${totalLines} lines; ${omittedLines} lines omitted]`;
+
+	return {
+		content: tail ? `${head}\n\n${marker}\n\n${tail}` : `${head}\n\n${marker}`,
+		truncated: true,
+		totalLines,
+	};
+}
+
+// ============================================================================
+// Formatting Helpers
+// ============================================================================
+
+/**
+ * Format file status character for display
+ */
+export function formatStatusChar(status: FileChangeStatus): string {
+	switch (status) {
+		case 'added':
+			return 'A';
+		case 'modified':
+			return 'M';
+		case 'deleted':
+			return 'D';
+		case 'renamed':
+			return 'R';
+		case 'copied':
+			return 'C';
+		default:
+			return '?';
+	}
+}

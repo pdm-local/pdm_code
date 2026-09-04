@@ -1,0 +1,241 @@
+/**
+ * Lazy registry of all built-in slash commands.
+ *
+ * Keeping this file flat and free of static command imports is how pdm
+ * avoids loading all 31 command modules at startup. Each entry carries the
+ * command's `name` and `description` inline (duplicated from the command
+ * module so the picker can render without triggering the load), plus a
+ * `load()` thunk that performs the dynamic import on first invocation.
+ *
+ * **When adding a new command:** add an entry here AND create the command
+ * file under `source/commands/`. Keep the description in sync with the
+ * module's own `description` field, they should match.
+ */
+import type {LazyCommand} from '@/types/commands';
+
+export const lazyCommands: LazyCommand[] = [
+	{
+		name: 'help',
+		description: 'Show available commands',
+		load: () => import('@/commands/help').then(m => m.helpCommand),
+	},
+	{
+		name: 'exit',
+		description: 'Exit the application',
+		load: () => import('@/commands/exit').then(m => m.exitCommand),
+	},
+	{
+		name: 'quit',
+		description: 'Quit the application',
+		load: () => import('@/commands/exit').then(m => m.quitCommand),
+	},
+	{
+		name: 'clear',
+		description: 'Clear the chat history, model context, and tasks',
+		load: () => import('@/commands/clear').then(m => m.clearCommand),
+	},
+	{
+		name: 'compact',
+		description:
+			'Compress message history (default LLM summary; use --mechanical, --preview, --restore, --auto-on/off, --threshold <n>, --strategy llm|mechanical)',
+		load: () => import('@/commands/compact').then(m => m.compactCommand),
+	},
+	{
+		name: 'codex-login',
+		description:
+			'Log in to ChatGPT/Codex (device flow). Saves credentials for the "ChatGPT" provider.',
+		load: () =>
+			import('@/commands/codex-login-command').then(m => m.codexLoginCommand),
+	},
+	{
+		name: 'copilot-login',
+		description:
+			'Log in to GitHub Copilot (device flow). Saves credentials for the "GitHub Copilot" provider.',
+		load: () =>
+			import('@/commands/copilot-login-command').then(
+				m => m.copilotLoginCommand,
+			),
+	},
+	{
+		name: 'context-max',
+		description:
+			'Set maximum context length for this session (e.g. /context-max 128k, --reset to clear)',
+		load: () => import('@/commands/context-max').then(m => m.contextMaxCommand),
+	},
+	{
+		name: 'copy',
+		description: 'Copy the last assistant response to the clipboard',
+		load: () => import('@/commands/copy').then(m => m.copyCommand),
+	},
+	{
+		name: 'commit',
+		description:
+			'Generate a conventional commit message from staged changes (--copy)',
+		progressLabel: 'Generating commit message',
+		load: () => import('@/commands/commit').then(m => m.commitCommand),
+	},
+	{
+		name: 'doctor',
+		description: 'Show environment health report for bug reports',
+		load: () => import('@/commands/doctor').then(m => m.doctorCommand),
+	},
+	{
+		name: 'model',
+		description: 'Select a model from any configured provider',
+		load: () => import('@/commands/model').then(m => m.modelCommand),
+	},
+	{
+		name: 'commands',
+		description:
+			'List custom commands. Subcommands: show <name>, create <name>',
+		load: () =>
+			import('@/commands/custom-commands').then(m => m.commandsCommand),
+	},
+	{
+		name: 'lsp',
+		description: 'Show connected LSP servers and their status',
+		load: () => import('@/commands/lsp').then(m => m.lspCommand),
+	},
+	{
+		name: 'mcp',
+		description: 'Show connected MCP servers and their tools',
+		load: () => import('@/commands/mcp').then(m => m.mcpCommand),
+	},
+	{
+		name: 'init',
+		description:
+			'Initialize pdm configuration and analyze project structure. Use --force to regenerate AGENTS.md.',
+		load: () => import('@/commands/init').then(m => m.initCommand),
+	},
+	{
+		name: 'explorer',
+		description: 'Browse project files and add to context',
+		load: () => import('@/commands/explorer').then(m => m.explorerCommand),
+	},
+	{
+		name: 'ide',
+		description: 'Connect to an IDE',
+		load: () => import('@/commands/ide').then(m => m.ideCommand),
+	},
+	{
+		name: 'export',
+		description: 'Export the chat history to a markdown file',
+		load: () => import('@/commands/export').then(m => m.exportCommand),
+	},
+	{
+		name: 'model-database',
+		description: 'Browse coding models from OpenRouter',
+		load: () =>
+			import('@/commands/model-database').then(m => m.modelDatabaseCommand),
+	},
+	{
+		name: 'status',
+		description: 'Display current status (provider, model, theme)',
+		load: () => import('@/commands/status').then(m => m.statusCommand),
+	},
+	{
+		name: 'setup-config',
+		description: 'Open a configuration file in your editor',
+		load: () =>
+			import('@/commands/setup-config').then(m => m.setupConfigCommand),
+	},
+	{
+		name: 'usage',
+		description: 'Display token usage statistics',
+		load: () => import('@/commands/usage').then(m => m.usageCommand),
+	},
+	{
+		name: 'tip',
+		description: 'Show a random PDM Code usage tip',
+		load: () => import('@/commands/tip').then(m => m.tipCommand),
+	},
+	{
+		name: 'checkpoint',
+		description:
+			'Manage conversation checkpoints - save and restore session snapshots',
+		load: () => import('@/commands/checkpoint').then(m => m.checkpointCommand),
+	},
+	{
+		name: 'rename',
+		description: 'Rename the current session (/rename <new name>)',
+		load: () => import('@/commands/rename').then(m => m.renameCommand),
+	},
+	{
+		name: 'resume',
+		description:
+			'List and resume previous chat sessions. Aliases: /sessions, /history',
+		load: () => import('@/commands/resume').then(m => m.resumeCommand),
+	},
+	{
+		name: 'retry',
+		description:
+			'Re-run the last user turn (use --model <id> to switch models first)',
+		load: () => import('@/commands/retry').then(m => m.retryCommand),
+	},
+	{
+		name: 'tasks',
+		description: 'Manage your task list',
+		load: () => import('@/commands/tasks').then(m => m.tasksCommand),
+	},
+	{
+		name: 'settings',
+		description:
+			'Configure settings (providers, MCP, theme, shapes, paste threshold). Accepts a tab: /settings providers',
+		load: () => import('@/commands/settings').then(m => m.settingsCommand),
+	},
+	{
+		name: 'tune',
+		description:
+			'Tune model settings (parameters, tool profiles, prompt, compaction)',
+		load: () => import('@/commands/tune').then(m => m.tuneCommand),
+	},
+	{
+		name: 'schedule',
+		description:
+			'List cron-triggered skills (single-file frontmatter + bundle skill.yaml). Read-only - edit the source file to change.',
+		load: () => import('@/commands/schedule').then(m => m.scheduleCommand),
+	},
+	{
+		name: 'agents',
+		description:
+			'List subagents. /agents show <name> for details, /agents copy <name> to customize',
+		load: () => import('@/commands/agents').then(m => m.agentsCommand),
+	},
+	{
+		name: 'credits',
+		description: 'Show project contributors and dependencies',
+		load: () => import('@/commands/credits').then(m => m.creditsCommand),
+	},
+	{
+		name: 'tools',
+		description:
+			'List available tools (built-in, MCP, custom). Subcommand: create <name>',
+		load: () => import('@/commands/tools').then(m => m.toolsCommand),
+	},
+	{
+		name: 'skills',
+		description:
+			'List loaded skills. Subcommands: show <name>, create <name>, check <name>, promote <name>, demote <name>.',
+		load: () => import('@/commands/skills').then(m => m.skillsCommand),
+	},
+	{
+		name: 'repomap',
+		description:
+			'Show a ranked map of the codebase (files and their key symbols). Use --tokens <n> to widen it.',
+		progressLabel: 'Building repo map',
+		load: () => import('@/commands/repomap').then(m => m.repomapCommand),
+	},
+	{
+		name: 'privacy',
+		description:
+			'Inspect what the prompt scrubber will remove from your prompts',
+		load: () => import('@/commands/privacy').then(m => m.privacyCommand),
+	},
+	{
+		name: 'vision-model',
+		description:
+			'Set the vision model used to describe images (e.g. /vision-model ollama gemma3:4b)',
+		load: () =>
+			import('@/commands/vision-model').then(m => m.visionModelCommand),
+	},
+];

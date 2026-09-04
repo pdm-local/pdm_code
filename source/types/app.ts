@@ -1,0 +1,60 @@
+import React from 'react';
+import type {SettingsTabId} from '@/app/components/settings-constants';
+import {CustomCommandExecutor} from '@/custom-commands/executor';
+import {CustomCommandLoader} from '@/custom-commands/loader';
+import type {Session} from '@/session/session-manager';
+import type {CheckpointListItem} from './checkpoint';
+import type {CustomCommand} from './commands';
+import type {AIProviderConfig, TuneConfig} from './config';
+import type {
+	ApiCallRecord,
+	ApiUsageSnapshot,
+	DevelopmentMode,
+	ImageAttachment,
+	Message,
+} from './core';
+
+export interface MessageSubmissionOptions {
+	customCommandCache: Map<string, CustomCommand>;
+	customCommandLoader: CustomCommandLoader | null;
+	customCommandExecutor: CustomCommandExecutor | null;
+	onClearMessages: () => Promise<void>;
+	onClearCounterIncrement?: () => void;
+	onRenameSession: (name: string) => void;
+	commandArgs?: string[];
+	onEnterModelSelectionMode: () => void;
+	onEnterModelDatabaseMode: () => void;
+	onEnterSettingsMode: (tab?: SettingsTabId) => void;
+	onEnterExplorerMode: () => void;
+	onEnterIdeSelectionMode: () => void;
+	onEnterTune: () => void;
+	onEnterCheckpointLoadMode: (
+		checkpoints: CheckpointListItem[],
+		currentMessageCount: number,
+	) => void;
+	onEnterSessionSelectorMode?: (showAll?: boolean) => void;
+	onResumeSession?: (session: Session) => void;
+	onShowStatus: () => void;
+	onHandleChatMessage: (
+		message: string,
+		displayValue?: string,
+		images?: ImageAttachment[],
+	) => Promise<void>;
+	onSwitchModel?: (provider: string, model: string) => Promise<boolean>;
+	onAddToChatQueue: (component: React.ReactNode) => void;
+	setLiveComponent: (component: React.ReactNode) => void;
+	setIsToolExecuting: (value: boolean) => void;
+	onCommandComplete?: () => void;
+	setMessages: (messages: Message[]) => void;
+	messages: Message[];
+	provider: string;
+	providerConfig: AIProviderConfig | null;
+	client: import('./core').LLMClient | null;
+	model: string;
+	theme: string;
+	getMessageTokens: (message: Message) => number;
+	tune?: TuneConfig;
+	developmentMode?: DevelopmentMode;
+	lastApiUsage?: ApiUsageSnapshot | null;
+	apiCallHistory?: ApiCallRecord[];
+}

@@ -1,0 +1,230 @@
+import type {LanguageModel} from 'ai';
+import {Agent} from 'undici';
+import {
+	TIMEOUT_SOCKET_DEFAULT_MS,
+	TIMEOUT_SOCKET_LOCAL_DEFAULT_MS,
+} from '@/constants';
+import {getModelContextLimit} from '@/models/index.js';
+import type {
+	AIProviderConfig,
+	AISDKCoreTool,
+	LLMChatResponse,
+	LLMClient,
+	Message,
+	ModeOverrides,
+	StreamCallbacks,
+} from '@/types/index';
+import {getLogger} from '@/utils/logging';
+import {isLocalURL} from '@/utils/url-utils';
+import {handleChat} from './chat/chat-handler.js';
+import {normalizeModelIdForRequest} from './model-id.js';
+import {
+	createProvider,
+	type TaggedProvider,
+} from './providers/provider-factory.js';
+import {getTlsConnectOptions} from './tls-config.js';
+
+export class AISDKClient implements LLMClient {
+	// Definite-assignment: populated by the async `create()` factory before
+	// the client is handed to callers. The constructor only does sync setup.
+	private provider!: TaggedProvider;
+	private currentModel: string;
+	private availableModels: string[];
+	private providerConfig: AIProviderConfig;
+	private undiciAgent: Agent;
+	private cachedContextSize: number;
+	private maxRetries: number;
+
+	constructor(providerConfig: AIProviderConfig) {
+		const logger = getLogger();
+
+		this.providerConfig = providerConfig;
+		this.availableModels = providerConfig.models;
+		this.currentModel = providerConfig.models[0] || '';
+		this.cachedContextSize = 0;
+		// Default to 2 retries (same as AI SDK default), or use configured value
+		this.maxRetries = providerConfig.maxRetries ?? 2;
+
+		logger.info('AI SDK client initializing', {
+			models: this.availableModels,
+			defaultModel: this.currentModel,
+			provider: providerConfig.name || 'unknown',
+			baseUrl: providerConfig.config.baseURL ? '[REDACTED]' : undefined,
+			maxRetries: this.maxRetries,
+		});
+
+		const {connectionPool} = this.providerConfig;
+		const {requestTimeout, socketTimeout} = this.providerConfig;
+		const effectiveSocketTimeout = socketTimeout ?? requestTimeout;
+		const isLocal =
+			providerConfig.config.baseURL &&
+			isLocalURL(providerConfig.config.baseURL);
+		const defaultTimeout = isLocal
+			? TIMEOUT_SOCKET_LOCAL_DEFAULT_MS
+			: TIMEOUT_SOCKET_DEFAULT_MS;
+		const resolvedSocketTimeout =
+			effectiveSocketTimeout === -1
+				? 0
+				: (effectiveSocketTimeout ?? defaultTimeout);
+
+		this.undiciAgent = new Agent({
+			connect: {
+				timeout: resolvedSocketTimeout,
+				...getTlsConnectOptions(this.providerConfig),
+			},
+			bodyTimeout: resolvedSocketTimeout,
+			headersTimeout: resolvedSocketTimeout,
+			keepAliveTimeout: connectionPool?.idleTimeout,
+			keepAliveMaxTimeout: connectionPool?.cumulativeMaxIdleTimeout,
+		});
+
+		// Fetch context size asynchronously (don't block construction)
+		void this.updateContextSize();
+	}
+
+	/**
+	 * Fetch and cache context size from models.dev
+	 */
+	private async updateContextSize(): Promise<void> {
+		const logger = getLogger();
+		try {
+			const contextSize = await getModelContextLimit(this.currentModel, {
+				providerConfig: this.providerConfig,
+			});
+			this.cachedContextSize = contextSize || 0;
+		} catch (error) {
+			logger.debug('Failed to get model context size', {
+				model: this.currentModel,
+				error,
+			});
+			this.cachedContextSize = 0;
+		}
+	}
+
+	static async create(providerConfig: AIProviderConfig): Promise<AISDKClient> {
+		const client = new AISDKClient(providerConfig);
+		// Async provider creation, lazily loads only the SDK package the
+		// configured `sdkProvider` actually needs.
+		client.provider = await createProvider(
+			client.providerConfig,
+			client.undiciAgent,
+		);
+		return client;
+	}
+
+	setModel(model: string): void {
+		const logger = getLogger();
+		const previousModel = this.currentModel;
+
+		this.currentModel = model;
+
+		logger.info('Model changed', {
+			previousModel,
+			newModel: model,
+			provider: this.providerConfig.name,
+		});
+
+		// Update context size when model changes
+		void this.updateContextSize();
+	}
+
+	getCurrentModel(): string {
+		return this.currentModel;
+	}
+
+	getProviderConfig(): AIProviderConfig {
+		return this.providerConfig;
+	}
+
+	getContextSize(): number {
+		return this.cachedContextSize;
+	}
+
+	getMaxRetries(): number {
+		return this.maxRetries;
+	}
+
+	getAvailableModels(): Promise<string[]> {
+		return Promise.resolve(this.availableModels);
+	}
+
+	/**
+	 * Stream chat with real-time token updates
+	 */
+	async chat(
+		messages: Message[],
+		tools: Record<string, AISDKCoreTool>,
+		callbacks: StreamCallbacks,
+		signal?: AbortSignal,
+		modeOverrides?: ModeOverrides,
+	): Promise<LLMChatResponse> {
+		// Get the language model instance from the tagged provider.
+		// GitHub Copilot requires routing: GPT-5+ → Responses API, others → Chat Completions.
+		// ChatGPT/Codex always uses the Responses API.
+		const model: LanguageModel = (() => {
+			switch (this.provider.kind) {
+				case 'chatgpt-codex':
+					return this.provider.provider.responses(this.currentModel);
+				case 'github-copilot':
+					return this.currentModel.includes('gpt-5')
+						? this.provider.provider.responses(this.currentModel)
+						: this.provider.provider.chat(this.currentModel);
+				case 'openai-compatible':
+					return this.provider.provider(
+						normalizeModelIdForRequest(
+							this.providerConfig.config.baseURL,
+							this.currentModel,
+						),
+					) as LanguageModel;
+				case 'anthropic':
+				case 'google':
+					return this.provider.provider(this.currentModel) as LanguageModel;
+			}
+		})();
+
+		// Delegate to chat handler
+		return await handleChat({
+			model,
+			currentModel: this.currentModel,
+			providerConfig: this.providerConfig,
+			messages,
+			tools,
+			callbacks,
+			signal,
+			maxRetries: this.maxRetries,
+			modeOverrides,
+			privacySessionMapRef: modeOverrides?.privacySessionMapRef,
+			privacyEnabled: modeOverrides?.privacyEnabled,
+			onPrivacyEvent: callbacks.onPrivacyEvent,
+		});
+	}
+
+	clearContext(): Promise<void> {
+		const logger = getLogger();
+
+		logger.debug('AI SDK client context cleared', {
+			model: this.currentModel,
+			provider: this.providerConfig.name,
+		});
+
+		// No internal state to clear
+		return Promise.resolve();
+	}
+
+	getTimeout(): number | undefined {
+		return (
+			this.providerConfig.socketTimeout ?? this.providerConfig.requestTimeout
+		);
+	}
+
+	/**
+	 * Closes the client's undici Agent. Every client owns its own Agent (see
+	 * the constructor), so a caller that creates clients outside the normal
+	 * app-lifetime single client, e.g. the vision delegate, which caches one
+	 * per delegate model, must call this on eviction or the keep-alive
+	 * sockets leak.
+	 */
+	async dispose(): Promise<void> {
+		await this.undiciAgent.close();
+	}
+}

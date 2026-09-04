@@ -1,0 +1,28 @@
+# Exclude test files from security scanning (not production code)
+**/*.spec.ts
+**/*.spec.tsx
+**/*.test.ts
+**/*.test.tsx
+
+# Exclude test directories
+**/test/**
+**/tests/**
+**/__tests__/**
+
+# Exclude documentation
+**/docs/**
+
+# Exclude configuration and build files
+**/.husky/**
+**/dist/**
+**/build/**
+**/node_modules/**
+
+# Exclude TypeScript declaration files
+**/*.d.ts
+
+# Exclude vendored/minified third-party bundles. Semgrep prints the full source
+# line as context for each finding, and a minified bundle is one line tens of
+# thousands of characters wide - a handful of low-value findings buries the
+# report. Upstream libraries are covered by `pnpm audit`, not by source rules.
+**/*.min.js

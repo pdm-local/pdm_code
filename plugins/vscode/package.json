@@ -1,0 +1,230 @@
+{
+	"name": "pdm-vscode",
+	"displayName": "PDM Code",
+	"description": "VS Code integration for PDM Code - local-first AI coding assistant",
+	"version": "0.3.0",
+	"publisher": "pdm-local",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/pdm-local/pdm_code.git"
+	},
+	"engines": {
+		"vscode": "^1.125.0"
+	},
+	"categories": [
+		"Programming Languages",
+		"Machine Learning",
+		"Other"
+	],
+	"keywords": [
+		"ai",
+		"coding",
+		"assistant",
+		"pdm",
+		"ollama",
+		"local"
+	],
+	"activationEvents": [
+		"onStartupFinished"
+	],
+	"main": "./dist/extension.js",
+	"icon": "media/icon.png",
+	"contributes": {
+		"viewsContainers": {
+			"activitybar": [
+				{
+					"id": "pdm-sidebar",
+					"title": "PDM Code",
+					"icon": "media/icon.svg"
+				}
+			]
+		},
+		"views": {
+			"pdm-sidebar": [
+				{
+					"type": "webview",
+					"id": "pdm.chatView",
+					"name": "Chat",
+					"icon": "media/icon.svg"
+				}
+			]
+		},
+		"commands": [
+			{
+				"command": "pdm.connect",
+				"title": "Connect to PDM Code",
+				"category": "PDM Code"
+			},
+			{
+				"command": "pdm.disconnect",
+				"title": "Disconnect from PDM Code",
+				"category": "PDM Code"
+			},
+			{
+				"command": "pdm.startCli",
+				"title": "Start PDM Code CLI",
+				"category": "PDM Code"
+			},
+			{
+				"command": "pdm.toggleHistory",
+				"title": "View Session History",
+				"category": "PDM Code",
+				"icon": "$(history)"
+			},
+			{
+				"command": "pdm.openConfig",
+				"title": "Open Configuration",
+				"category": "PDM Code"
+			},
+			{
+				"command": "pdm.newChat",
+				"title": "New Chat",
+				"category": "PDM Code",
+				"icon": "$(add)"
+			},
+			{
+				"command": "pdm.toggleSettings",
+				"title": "Settings",
+				"category": "PDM Code",
+				"icon": "$(gear)"
+			},
+			{
+				"command": "pdm.cancel",
+				"title": "Cancel Current Response",
+				"category": "PDM Code"
+			},
+			{
+				"command": "pdm.copyLastCodeBlock",
+				"title": "Copy Last Code Block",
+				"category": "PDM Code"
+			},
+			{
+				"command": "pdm.explainCode",
+				"title": "Explain Code",
+				"category": "PDM Code"
+			},
+			{
+				"command": "pdm.generateTests",
+				"title": "Generate Tests",
+				"category": "PDM Code"
+			}
+		],
+		"keybindings": [
+			{
+				"command": "pdm.copyLastCodeBlock",
+				"key": "ctrl+alt+shift+c",
+				"mac": "cmd+alt+shift+c",
+				"when": "focusedView == pdm.chatView"
+			}
+		],
+		"menus": {
+			"view/title": [
+				{
+					"command": "pdm.newChat",
+					"when": "view == pdm.chatView",
+					"group": "navigation@1"
+				},
+				{
+					"command": "pdm.toggleHistory",
+					"when": "view == pdm.chatView",
+					"group": "navigation@2"
+				},
+				{
+					"command": "pdm.toggleSettings",
+					"when": "view == pdm.chatView",
+					"group": "navigation@3"
+				}
+			],
+			"commandPalette": [
+				{
+					"command": "pdm.explainCode",
+					"when": "false"
+				},
+				{
+					"command": "pdm.generateTests",
+					"when": "false"
+				}
+			]
+		},
+		"configuration": {
+			"title": "PDM Code",
+			"properties": {
+				"pdm.serverPort": {
+					"type": "number",
+					"default": 51820,
+					"description": "WebSocket server port for communication with PDM Code CLI"
+				},
+				"pdm.autoConnect": {
+					"type": "boolean",
+					"default": false,
+					"description": "Automatically connect to PDM Code CLI on startup (legacy WebSocket companion)"
+				},
+				"pdm.autoStartCli": {
+					"type": "boolean",
+					"default": false,
+					"description": "Automatically start PDM Code CLI if not running"
+				},
+				"pdm.showDiffPreview": {
+					"type": "boolean",
+					"default": true,
+					"description": "Show diff preview before applying file changes"
+				},
+				"pdm.mode": {
+					"type": "string",
+					"default": "auto-accept",
+					"scope": "resource",
+					"description": "The current operating mode for the PDM Code assistant (e.g. chat, auto-accept)"
+				},
+				"pdm.model": {
+					"type": "string",
+					"scope": "machine",
+					"description": "The AI model to use for PDM Code sessions"
+				},
+				"pdm.cliPath": {
+					"type": "string",
+					"scope": "machine",
+					"description": "Absolute path to the pdm CLI executable. If empty, uses the globally installed pdm."
+				},
+				"pdm.cwd": {
+					"type": "string",
+					"scope": "resource",
+					"description": "Working directory for the PDM Code CLI. Defaults to the current VS Code workspace root."
+				},
+				"pdm.codeLens": {
+					"type": "boolean",
+					"default": true,
+					"scope": "resource",
+					"description": "Show Explain Code / Generate Tests actions above functions and classes in the editor."
+				}
+			}
+		}
+	},
+	"scripts": {
+		"vscode:prepublish": "pnpm run build",
+		"build": "concurrently \"pnpm run build:ext\" \"pnpm run build:css\"",
+		"watch": "concurrently \"pnpm run watch:ext\" \"pnpm run watch:css\"",
+		"build:ext": "esbuild ./src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --minify",
+		"watch:ext": "esbuild ./src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --watch",
+		"build:css": "tailwindcss -i ./src/styles.css -o ./media/chat-panel.css --minify",
+		"watch:css": "tailwindcss -i ./src/styles.css -o ./media/chat-panel.css --watch",
+		"lint": "eslint src --ext ts"
+	},
+	"devDependencies": {
+		"@tailwindcss/cli": "^4.3.3",
+		"@types/node": "^26.1.2",
+		"@types/vscode": "^1.125.0",
+		"@types/ws": "^8.5.10",
+		"@vscode/vsce": "^3.9.1",
+		"autoprefixer": "^10.4.19",
+		"concurrently": "^8.2.2",
+		"esbuild": "^0.28.1",
+		"eslint": "^10.1.0",
+		"postcss": "^8.4.38",
+		"tailwindcss": "^4.3.3",
+		"typescript": "^7.0.2"
+	},
+	"dependencies": {
+		"@agentclientprotocol/sdk": "^1.3.0",
+		"ws": "^8.16.0"
+	}
+}

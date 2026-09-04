@@ -1,0 +1,32 @@
+{
+	"$schema": "https://unpkg.com/knip@5/schema.json",
+	"ignoreDependencies": [
+		"pino-pretty",
+		"pino-roll",
+		"sonic-boom",
+		"lint-staged"
+	],
+	"ignoreBinaries": [
+		"vsce",
+		"semgrep",
+		"which",
+		"gh",
+		"osascript",
+		"notify-send",
+		"powershell"
+	],
+	"ignore": [
+		"source/utils/message-queue.tsx",
+		"source/vscode/**/*.ts",
+		"plugins/**/*",
+		"scripts/fetch-models.js",
+		".husky/**",
+		".github/**",
+		"benchmarks/count-loader.mjs"
+	],
+	"ignoreExportsUsedInFile": {
+		"interface": true,
+		"type": true
+	},
+	"tags": ["-@internal"]
+}

@@ -1,0 +1,47 @@
+packages:
+  - .
+  - plugins/*
+
+minimumReleaseAge: 10080
+blockExoticSubdeps: true
+trustPolicy: no-downgrade
+
+overrides:
+  tmp: ">=0.2.6"
+
+allowBuilds:
+  # Native file-watcher pulled in by @tailwindcss/cli. Only needed for
+  # --watch; the extension build is one-shot, so it stays unbuilt.
+  '@parcel/watcher': false
+  '@vscode/vsce-sign': true
+  esbuild: true
+  keytar: true
+  node-llama-cpp: false
+
+auditConfig: {}
+
+ignoredBuiltDependencies:
+  - protobufjs
+
+# semver@5.7.2 (via @vscode/vsce -> parse-semver) is the 2023 ReDoS-fix
+# release of the v5 line; it predates npm provenance while later-published
+# 7.x releases have it, so the no-downgrade trust check flags it on fresh
+# resolution. Already present in the committed lockfile - exact version only.
+trustPolicyExclude:
+  - semver@5.7.2
+
+minimumReleaseAgeExclude:
+  - brace-expansion@1.1.14
+  - '@hono/node-server@1.19.14'
+  - fast-uri@3.1.2
+  - hono@4.12.18
+
+onlyBuiltDependencies:
+  - '@biomejs/biome'
+  - '@vscode/vsce-sign'
+  - esbuild
+  - keytar
+
+patchedDependencies:
+  '@ai-sdk/openai@3.0.71': patches/@ai-sdk__openai@3.0.71.patch
+  ink@6.8.0: patches/ink@6.8.0.patch

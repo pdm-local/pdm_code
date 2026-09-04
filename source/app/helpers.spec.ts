@@ -1,0 +1,106 @@
+import test from 'ava';
+import {TOOL_APPROVAL_REQUIRED_KIND, TOOL_APPROVAL_REQUIRED_PREFIX} from '@/constants';
+import {isNonInteractiveModeComplete} from './helpers';
+import type {NonInteractiveModeState} from './types';
+
+test('isNonInteractiveModeComplete returns timeout when time exceeded', t => {
+	const state: NonInteractiveModeState = {
+		isToolExecuting: false,
+		isToolConfirmationMode: false,
+		isConversationComplete: false,
+		messages: [],
+	};
+
+	const startTime = Date.now() - 11000; // 11 seconds ago
+	const maxTime = 10000; // 10 second timeout
+
+	const result = isNonInteractiveModeComplete(state, startTime, maxTime);
+	t.true(result.shouldExit);
+	t.is(result.reason, 'timeout');
+});
+
+test('isNonInteractiveModeComplete returns tool-approval-required when tool approval required', t => {
+	const state: NonInteractiveModeState = {
+		isToolExecuting: false,
+		isToolConfirmationMode: false,
+		isConversationComplete: false,
+		// Exactly what conversation-loop emits, prefix and all.
+		messages: [
+			{
+				role: 'assistant',
+				content: `${TOOL_APPROVAL_REQUIRED_PREFIX}execute_bash. Exiting non-interactive mode`,
+			},
+		],
+	};
+
+	const startTime = Date.now();
+	const maxTime = 10000;
+
+	const result = isNonInteractiveModeComplete(state, startTime, maxTime);
+	t.true(result.shouldExit);
+	t.is(result.reason, TOOL_APPROVAL_REQUIRED_KIND);
+});
+
+test('isNonInteractiveModeComplete returns error when error messages present', t => {
+	const state: NonInteractiveModeState = {
+		isToolExecuting: false,
+		isToolConfirmationMode: false,
+		isConversationComplete: false,
+		messages: [{role: 'error', content: 'Something went wrong'}],
+	};
+
+	const startTime = Date.now();
+	const maxTime = 10000;
+
+	const result = isNonInteractiveModeComplete(state, startTime, maxTime);
+	t.true(result.shouldExit);
+	t.is(result.reason, 'error');
+});
+
+test('isNonInteractiveModeComplete does not treat message content containing "error" as an error', t => {
+	const state: NonInteractiveModeState = {
+		isToolExecuting: false,
+		isToolConfirmationMode: false,
+		isConversationComplete: true,
+		messages: [{role: 'user', content: 'Analyse the error'}],
+	};
+
+	const startTime = Date.now();
+	const maxTime = 10000;
+
+	const result = isNonInteractiveModeComplete(state, startTime, maxTime);
+	t.true(result.shouldExit);
+	t.is(result.reason, 'complete');
+});
+
+test('isNonInteractiveModeComplete returns complete when conversation finished', t => {
+	const state: NonInteractiveModeState = {
+		isToolExecuting: false,
+		isToolConfirmationMode: false,
+		isConversationComplete: true,
+		messages: [{role: 'assistant', content: 'Done'}],
+	};
+
+	const startTime = Date.now();
+	const maxTime = 10000;
+
+	const result = isNonInteractiveModeComplete(state, startTime, maxTime);
+	t.true(result.shouldExit);
+	t.is(result.reason, 'complete');
+});
+
+test('isNonInteractiveModeComplete returns false when still processing', t => {
+	const state: NonInteractiveModeState = {
+		isToolExecuting: true,
+		isToolConfirmationMode: false,
+		isConversationComplete: false,
+		messages: [],
+	};
+
+	const startTime = Date.now();
+	const maxTime = 10000;
+
+	const result = isNonInteractiveModeComplete(state, startTime, maxTime);
+	t.false(result.shouldExit);
+	t.is(result.reason, null);
+});

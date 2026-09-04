@@ -1,0 +1,518 @@
+import React from 'react';
+import {appendToolDefinitionsToPrompt} from '@/ai-sdk-client/tools/system-prompt-assembler';
+import {ConversationStateManager} from '@/app/utils/conversation-state';
+import UserMessage from '@/components/user-message';
+import {getAppConfig} from '@/config/index';
+import {
+	getPreferencesVersion,
+	getProfessionalTone,
+	subscribeToPreferences,
+} from '@/config/preferences';
+import {CommandIntegration} from '@/custom-commands/command-integration';
+import {processToolUse} from '@/message-handler';
+import {getModelVisionSupport} from '@/models/index';
+import {generateKey} from '@/session/key-generator';
+import {getTuneToolMode} from '@/types/config';
+import type {ImageAttachment, Message} from '@/types/core';
+import {MessageBuilder} from '@/utils/message-builder';
+import {infoMsg} from '@/utils/message-factory';
+import {buildSystemPrompt, setLastBuiltPrompt} from '@/utils/prompt-builder';
+import {describeImages} from '@/vision/vision-delegate';
+import {processAssistantResponse} from './conversation/conversation-loop';
+import {createResetStreamingState} from './state/streaming-state';
+import type {ChatHandlerReturn, UseChatHandlerProps} from './types';
+import {displayError as displayErrorHelper} from './utils/message-helpers';
+
+export function getBaseSystemPrompt(
+	developmentMode: UseChatHandlerProps['developmentMode'],
+	cachedBasePrompt: string | null,
+	toolManager: NonNullable<UseChatHandlerProps['toolManager']>,
+	tune: UseChatHandlerProps['tune'],
+	toolsDisabled: boolean,
+	model?: string,
+): string {
+	const systemPromptOverride = getAppConfig().systemPrompt;
+	if (developmentMode === 'headless') {
+		return buildSystemPrompt(
+			developmentMode,
+			tune,
+			toolManager.getAvailableToolNames(
+				tune,
+				developmentMode,
+				undefined,
+				model,
+			),
+			toolsDisabled,
+			systemPromptOverride,
+			model,
+		);
+	}
+
+	return (
+		cachedBasePrompt ??
+		buildSystemPrompt(
+			developmentMode ?? 'normal',
+			tune,
+			toolManager.getAvailableToolNames(
+				tune,
+				developmentMode ?? 'normal',
+				undefined,
+				model,
+			),
+			toolsDisabled,
+			systemPromptOverride,
+			model,
+		)
+	);
+}
+
+/**
+ * Main chat handler hook that manages LLM conversations and tool execution.
+ * Orchestrates streaming responses, tool calls, and conversation state.
+ */
+export function useChatHandler({
+	client,
+	toolManager,
+	customCommandLoader,
+	messages,
+	setMessages,
+	currentProvider,
+	currentModel,
+	setIsCancelling,
+	addToChatQueue,
+	abortController,
+	setAbortController,
+	developmentMode = 'normal',
+	developmentModeRef,
+	nonInteractiveMode = false,
+	onConversationComplete,
+	onPlanTurnComplete,
+	reasoningExpandedRef,
+	compactToolDisplayRef,
+	onSetCompactToolCounts,
+	compactToolCountsRef,
+	onSetLiveTaskList,
+	setLiveComponent,
+	setLastApiUsage,
+	onApiCallComplete,
+	tune,
+	subagentsReady,
+	privacySessionMapRef,
+	privacyEnabled,
+	ensureCurrentSessionId,
+}: UseChatHandlerProps): ChatHandlerReturn {
+	// Conversation state manager for enhanced context
+	const conversationStateManager = React.useRef(new ConversationStateManager());
+
+	// Resolve the active fallback format when native tools are disabled. When
+	// native is on, this value is unused. The tune override takes priority over
+	// provider-level disables so users can pick the JSON path explicitly even
+	// for providers we'd otherwise mark as XML-only.
+	const tuneToolMode = React.useMemo(() => getTuneToolMode(tune), [tune]);
+
+	// Check if native tool calling is disabled (provider config or tune override)
+	const toolsDisabled = React.useMemo(() => {
+		if (tuneToolMode !== 'native') return true;
+		const config = getAppConfig();
+		const provider = config.providers?.find(p => p.name === currentProvider);
+		if (!provider) return false;
+		return (
+			provider.disableTools === true ||
+			(provider.disableToolModels?.includes(currentModel) ?? false)
+		);
+	}, [currentProvider, currentModel, tuneToolMode]);
+
+	// When native is off, the fallback format is whatever the tune chose; if the
+	// disable came from provider config (and tune is on 'native'), default to XML
+	// to match historical behaviour.
+	const fallbackToolFormat: 'xml' | 'json' =
+		tuneToolMode === 'json' ? 'json' : 'xml';
+
+	// Prompt-affecting preferences (Professional Tone) are written straight to
+	// disk by the settings panel, so subscribe to those writes explicitly.
+	// Without this the memo below only picks the change up on the next mode or
+	// model switch, which reads as the toggle silently not working.
+	const preferencesVersion = React.useSyncExternalStore(
+		subscribeToPreferences,
+		getPreferencesVersion,
+	);
+
+	// Cache the base system prompt, only rebuild when mode, tune, tools, toolsDisabled
+	// or a prompt-affecting preference change
+	// This preserves KV cache by keeping the system message stable across turns
+	// When native tools are disabled, XML tool definitions are included in the prompt
+	// so token counting reflects the full system message the model actually sees.
+	// biome-ignore lint/correctness/useExhaustiveDependencies: subagentsReady and preferencesVersion aren't read in the callback, but flipping either must invalidate the memo, subagentsReady so buildSystemPrompt re-reads the module-level subagent cache populated by setAvailableSubagents, preferencesVersion so it re-reads getProfessionalTone().
+	const cachedBasePrompt = React.useMemo(() => {
+		if (!toolManager) return null;
+		const availableNames = toolManager.getAvailableToolNames(
+			tune,
+			developmentMode,
+			undefined,
+			currentModel,
+		);
+		const basePrompt = buildSystemPrompt(
+			developmentMode,
+			tune,
+			availableNames,
+			toolsDisabled,
+			getAppConfig().systemPrompt,
+			currentModel,
+			getProfessionalTone(),
+		);
+
+		const tools = toolsDisabled
+			? toolManager.getFilteredTools(availableNames)
+			: {};
+		const prompt = appendToolDefinitionsToPrompt(
+			basePrompt,
+			toolsDisabled,
+			fallbackToolFormat,
+			tools,
+		);
+
+		// Update the cached prompt so /usage and context % see the full prompt
+		setLastBuiltPrompt(prompt);
+
+		return prompt;
+	}, [
+		developmentMode,
+		tune,
+		toolManager,
+		toolsDisabled,
+		fallbackToolFormat,
+		subagentsReady,
+		currentModel,
+		preferencesVersion,
+	]);
+
+	// Track when the current conversation started for elapsed time display
+	const conversationStartTimeRef = React.useRef<number>(Date.now());
+
+	// Memoize CommandIntegration to avoid recreating on every message
+	const commandIntegration = React.useMemo(() => {
+		if (!toolManager || !customCommandLoader) return null;
+		return new CommandIntegration(customCommandLoader, toolManager);
+	}, [toolManager, customCommandLoader]);
+
+	// State for streaming message content
+	const [streamingContent, setStreamingContent] = React.useState<string>('');
+	const [isGenerating, setIsGenerating] = React.useState<boolean>(false);
+	const [streamingReasoning, setStreamingReasoning] =
+		React.useState<string>('');
+	const [tokenCount, setTokenCount] = React.useState<number>(0);
+
+	// Helper to reset all streaming state
+	const resetStreamingState = React.useCallback(
+		createResetStreamingState(
+			setIsCancelling,
+			setAbortController,
+			setIsGenerating,
+			setStreamingContent,
+			setStreamingReasoning,
+			setTokenCount,
+		),
+		[], // Setters are stable and don't need to be in dependencies
+	);
+
+	// Helper to display errors in chat queue
+	const displayError = React.useCallback(
+		(error: unknown, keyPrefix: string) => {
+			displayErrorHelper(error, keyPrefix, addToChatQueue);
+		},
+		[addToChatQueue],
+	);
+
+	// Reset conversation state when messages are cleared
+	React.useEffect(() => {
+		if (messages.length === 0) {
+			conversationStateManager.current.reset();
+			if (privacySessionMapRef) {
+				privacySessionMapRef.current = {};
+			}
+		}
+	}, [messages.length, privacySessionMapRef]);
+
+	// Wrapper for processAssistantResponse that includes error handling
+	const processAssistantResponseWithErrorHandling = React.useCallback(
+		async (
+			systemMessage: Message,
+			msgs: Message[],
+			sessionId?: string,
+			onToolExecuted?: (toolName: string) => void,
+			onFinalAssistantText?: (content: string) => void,
+		) => {
+			if (!client) return;
+
+			try {
+				await processAssistantResponse({
+					systemMessage,
+					messages: msgs,
+					client,
+					toolManager,
+					abortController,
+					setAbortController,
+					setIsGenerating,
+					setStreamingReasoning,
+					setStreamingContent,
+					setTokenCount,
+					setMessages,
+					addToChatQueue,
+					currentProvider,
+					currentModel,
+					developmentMode,
+					developmentModeRef,
+					nonInteractiveMode,
+					conversationStateManager,
+					onConversationComplete,
+					conversationStartTime: conversationStartTimeRef.current,
+					reasoningExpandedRef,
+					compactToolDisplayRef,
+					onSetCompactToolCounts,
+					compactToolCountsRef,
+					onSetLiveTaskList,
+					setLiveComponent,
+					setLastApiUsage,
+					onApiCallComplete,
+					tune,
+					privacySessionMapRef,
+					privacyEnabled,
+					sessionId,
+					workingDirectory: process.cwd(),
+					onToolExecuted,
+					onFinalAssistantText,
+					onPrivacyEvent: (count: number) => {
+						// `count` is the number of NEW identifiers scrubbed on this turn
+						// (the per-turn delta), not a session running total.
+						addToChatQueue(
+							infoMsg(
+								`Privacy active: scrubbed ${count} new identifier${count === 1 ? '' : 's'}`,
+								'privacy',
+							),
+						);
+					},
+				});
+			} catch (error) {
+				displayError(error, 'chat-error');
+				// Signal completion on error to avoid hanging in non-interactive mode
+				onConversationComplete?.();
+			} finally {
+				resetStreamingState();
+			}
+		},
+		[
+			client,
+			toolManager,
+			abortController,
+			setAbortController,
+			setMessages,
+			addToChatQueue,
+			currentProvider,
+			currentModel,
+			developmentMode,
+			developmentModeRef,
+			nonInteractiveMode,
+			onConversationComplete,
+			reasoningExpandedRef,
+			compactToolDisplayRef,
+			compactToolCountsRef,
+			onSetCompactToolCounts,
+			onSetLiveTaskList,
+			tune,
+			displayError,
+			resetStreamingState,
+			setLiveComponent,
+			setLastApiUsage,
+			onApiCallComplete,
+			privacySessionMapRef,
+			privacyEnabled,
+		],
+	);
+
+	// Handle chat message processing
+	const handleChatMessage = async (
+		message: string,
+		displayValue?: string,
+		images?: ImageAttachment[],
+	) => {
+		if (!client || !toolManager) return;
+
+		// Pasted/attached images are only ever handed to the model directly
+		// when it can actually see them. Resolved before anything is queued,
+		// so a non-vision model with no delegate configured fails fast instead
+		// of leaving a message bubble behind for a send that never happens.
+		//
+		// Once described, the delegate's text replaces the images entirely -
+		// `images` is set to undefined below, and it stays out of the message
+		// passed to MessageBuilder.addUserMessage. This is the containment
+		// guarantee: base64 image bytes must never enter persisted message
+		// history for a model that can't see them, since messages are kept for
+		// the life of the session, re-tokenized every turn, and fed through
+		// auto-compaction.
+		const imageCount = images?.length ?? 0;
+		let imageDescription: string | undefined;
+		let delegateNote: string | undefined;
+		if (images && images.length > 0) {
+			const support = await getModelVisionSupport(currentModel, {
+				providerConfig: client.getProviderConfig(),
+			});
+			if (support === 'no') {
+				try {
+					const described = await describeImages({
+						images,
+						currentProvider,
+						currentModel,
+					});
+					imageDescription = `[Image described by ${described.provider}/${described.model}]\n${described.description}`;
+					// Surfaced after the user's bubble below: without it, the
+					// routing is invisible and the reply reads as if the model
+					// saw the image itself.
+					delegateNote = `Image described by ${described.provider}/${described.model} (${(described.elapsedMs / 1000).toFixed(1)}s).`;
+					images = undefined;
+				} catch (error) {
+					displayError(error, 'vision-delegate-error');
+					return;
+				}
+			}
+		}
+
+		const sessionId = ensureCurrentSessionId?.();
+		let wrotePlan = false;
+		let finalAssistantText = '';
+
+		// Record conversation start time for elapsed time display
+		conversationStartTimeRef.current = Date.now();
+
+		// The submit chain hands us the display version (with [@file]
+		// placeholders) alongside the fully assembled message. Use it directly
+		// for the bubble; fall back to the raw message for callers that have no
+		// placeholder view (custom commands, VS Code prompts).
+		const displayMessage = displayValue ?? message;
+
+		// Add user message to chat using display version (with placeholders)
+		// Pass the full assembled message for accurate token counting
+		addToChatQueue(
+			<UserMessage
+				key={generateKey('user')}
+				message={displayMessage}
+				tokenContent={message}
+				imageCount={imageCount}
+			/>,
+		);
+
+		if (delegateNote) {
+			addToChatQueue(infoMsg(delegateNote, 'vision-delegate-note'));
+		}
+
+		// Add user message to conversation history (single addition)
+		const builder = new MessageBuilder(messages);
+		const messageWithImageDescription = imageDescription
+			? `${message}\n\n${imageDescription}`
+			: message;
+		builder.addUserMessage(messageWithImageDescription, images);
+		const updatedMessages = builder.build();
+		setMessages(updatedMessages);
+
+		// Initialize conversation state if this is a new conversation
+		if (messages.length === 0) {
+			conversationStateManager.current.initializeState(message);
+		}
+
+		// Create abort controller for cancellation
+		const controller = new AbortController();
+		setAbortController(controller);
+
+		try {
+			let systemPrompt = getBaseSystemPrompt(
+				developmentMode,
+				cachedBasePrompt,
+				toolManager,
+				tune,
+				toolsDisabled,
+				currentModel,
+			);
+
+			// Enhance with relevant commands (progressive disclosure)
+			if (commandIntegration) {
+				systemPrompt = commandIntegration.enhanceSystemPrompt(
+					systemPrompt,
+					message,
+				);
+			}
+
+			// Create stream request
+			const systemMessage: Message = {
+				role: 'system',
+				content: systemPrompt,
+			};
+
+			// Use the conversation loop
+			await processAssistantResponseWithErrorHandling(
+				systemMessage,
+				updatedMessages,
+				sessionId,
+				toolName => {
+					if (toolName === 'write_plan') wrotePlan = true;
+				},
+				content => {
+					finalAssistantText = content;
+				},
+			);
+
+			if (
+				developmentMode === 'plan' &&
+				!wrotePlan &&
+				!controller.signal.aborted &&
+				finalAssistantText.trim()
+			) {
+				const fallbackResult = await processToolUse(
+					{
+						id: 'write-plan-fallback',
+						function: {
+							name: 'write_plan',
+							arguments: {content: finalAssistantText},
+						},
+					},
+					{
+						abortSignal: controller.signal,
+						sessionId,
+						workingDirectory: process.cwd(),
+					},
+				);
+				if (fallbackResult.isError) {
+					displayError(new Error(fallbackResult.content), 'plan-fallback');
+				} else {
+					wrotePlan = true;
+				}
+			}
+
+			// If this turn STARTED in plan mode (closure value, captured at submit
+			// time) and ran to completion without being interrupted, a plan was
+			// actually produced, signal the plan review bar. Deciding here, with
+			// the start mode and the abort signal both in hand, avoids the race
+			// where toggling modes mid-generation makes an unrelated completing turn
+			// look like a finished plan.
+			if (
+				developmentMode === 'plan' &&
+				wrotePlan &&
+				!controller.signal.aborted
+			) {
+				onPlanTurnComplete?.();
+			}
+		} catch (error) {
+			displayError(error, 'chat-error');
+			onConversationComplete?.();
+		} finally {
+			resetStreamingState();
+		}
+	};
+
+	return {
+		handleChatMessage,
+		processAssistantResponse: processAssistantResponseWithErrorHandling,
+		isGenerating,
+		streamingReasoning,
+		streamingContent,
+		tokenCount,
+	};
+}

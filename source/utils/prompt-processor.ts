@@ -1,0 +1,109 @@
+import {isAbsolute, relative} from 'node:path';
+import {
+	FILE_MENTION_INLINE_MAX_LINES,
+	FILE_MENTION_PREVIEW_LINES,
+} from '@/constants';
+import type {InputState} from '../types/hooks';
+import {PlaceholderType} from '../types/hooks';
+import {findPlaceholderOccurrences} from './placeholders';
+
+/**
+ * Cached subagent descriptions for injection into the system prompt.
+ * Set via setAvailableSubagents() during app initialization.
+ */
+let cachedSubagentDescriptions = 'No subagents available.';
+
+/**
+ * Set the available subagents for system prompt injection.
+ * Call this during app initialization after the subagent loader is ready.
+ */
+export function setAvailableSubagents(
+	agents: Array<{name: string; description: string}>,
+): void {
+	if (agents.length === 0) {
+		cachedSubagentDescriptions = 'No subagents available.';
+		return;
+	}
+
+	cachedSubagentDescriptions = agents
+		.map(a => `- **${a.name}**: ${a.description}`)
+		.join('\n');
+}
+
+/**
+ * Get the current subagent descriptions for prompt building.
+ */
+export function getSubagentDescriptions(): string {
+	return cachedSubagentDescriptions;
+}
+
+/**
+ * Assemble the final prompt by replacing all placeholders with their full content
+ * This function is called before sending the prompt to the AI
+ */
+export function assemblePrompt(inputState: InputState): string {
+	let assembledPrompt = inputState.displayValue;
+
+	const occurrences = findPlaceholderOccurrences(
+		assembledPrompt,
+		inputState.placeholderContent,
+	);
+
+	// Walk backwards so each splice leaves the earlier offsets valid.
+	for (let i = occurrences.length - 1; i >= 0; i--) {
+		const {id, start, end} = occurrences[i];
+		const placeholderContent = inputState.placeholderContent[id];
+
+		// Each placeholder type can have its own replacement logic
+		let replacementContent = placeholderContent.content || '';
+
+		// Type-specific content assembly (extensible for future types)
+		switch (placeholderContent.type) {
+			case PlaceholderType.PASTE: {
+				// For paste, use content directly
+				replacementContent = placeholderContent.content;
+				break;
+			}
+			case PlaceholderType.FILE: {
+				// Format file content with header for LLM context. Large files
+				// inline only a head preview plus a read_file hint so a single
+				// @-mention can't flood the conversation; small files inline whole.
+				const fileName =
+					placeholderContent.filePath.split('/').pop() ||
+					placeholderContent.filePath;
+				const lines = placeholderContent.content.split('\n');
+				const totalLines = lines.length;
+
+				if (totalLines > FILE_MENTION_INLINE_MAX_LINES) {
+					const previewBody = lines
+						.slice(0, FILE_MENTION_PREVIEW_LINES)
+						.join('\n');
+					const remaining = totalLines - FILE_MENTION_PREVIEW_LINES;
+					const relPath = isAbsolute(placeholderContent.filePath)
+						? relative(process.cwd(), placeholderContent.filePath)
+						: placeholderContent.filePath;
+					const header = `=== File: ${fileName} (${totalLines} lines, showing first ${FILE_MENTION_PREVIEW_LINES}) ===`;
+					const footer = `=== ${remaining} more lines, use read_file('${relPath}') for the full file ===`;
+					replacementContent = `${header}\n${previewBody}\n${footer}`;
+				} else {
+					const header = `=== File: ${fileName} ===`;
+					const footer = '='.repeat(header.length);
+					replacementContent = `${header}\n${placeholderContent.content}\n${footer}`;
+				}
+				break;
+			}
+			default: {
+				placeholderContent satisfies never;
+				replacementContent = '';
+				break;
+			}
+		}
+
+		assembledPrompt =
+			assembledPrompt.slice(0, start) +
+			replacementContent +
+			assembledPrompt.slice(end);
+	}
+
+	return assembledPrompt;
+}

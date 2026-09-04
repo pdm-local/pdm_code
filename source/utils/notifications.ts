@@ -1,0 +1,210 @@
+import {execFile, execSync} from 'child_process';
+import {existsSync} from 'fs';
+import {basename, dirname, join} from 'path';
+import {fileURLToPath} from 'url';
+import type {NotificationsConfig} from '@/types/config';
+import {logInfo} from '@/utils/message-queue';
+
+export type NotificationEvent =
+	| 'toolConfirmation'
+	| 'questionPrompt'
+	| 'generationComplete'
+	| 'triggeredRunComplete';
+
+const DEFAULT_CONFIG: NotificationsConfig = {
+	enabled: false,
+	events: {
+		toolConfirmation: true,
+		questionPrompt: true,
+		generationComplete: true,
+		triggeredRunComplete: true,
+	},
+};
+
+let _config: NotificationsConfig = DEFAULT_CONFIG;
+
+export function setNotificationsConfig(config: NotificationsConfig): void {
+	_config = config;
+}
+
+export function getNotificationsConfig(): NotificationsConfig {
+	return _config;
+}
+
+const EVENT_MESSAGES: Record<
+	NotificationEvent,
+	{title: (projectName: string) => string; message: string}
+> = {
+	toolConfirmation: {
+		title: projectName => `Tool Confirmation Required in ${projectName}`,
+		message: 'PDM Code is waiting for you to approve a tool call.',
+	},
+	questionPrompt: {
+		title: projectName => `Question From Agent in ${projectName}`,
+		message: 'PDM Code has a question and is waiting for your response.',
+	},
+	generationComplete: {
+		title: projectName => `Response Ready in ${projectName}`,
+		message: 'PDM Code has finished generating a response.',
+	},
+	triggeredRunComplete: {
+		title: projectName => `Triggered Run Completed in ${projectName}`,
+		message: 'A skill subscription fired and its target finished running.',
+	},
+};
+
+// Resolve the icon path relative to this module's location
+let _iconPath: string | null | undefined;
+function getIconPath(): string | null {
+	if (_iconPath !== undefined) {
+		return _iconPath;
+	}
+	try {
+		const __filename = fileURLToPath(import.meta.url);
+		const __dirname = dirname(__filename);
+		const iconPath = join(__dirname, '../../plugins/vscode/media/icon.png');
+		_iconPath = existsSync(iconPath) ? iconPath : null;
+	} catch {
+		_iconPath = null;
+	}
+	return _iconPath;
+}
+
+// Check for terminal-notifier in PATH (cached)
+let _terminalNotifierPath: string | null | undefined;
+let _terminalNotifierHinted = false;
+
+function getTerminalNotifierPath(): string | null {
+	if (_terminalNotifierPath !== undefined) {
+		return _terminalNotifierPath;
+	}
+	try {
+		_terminalNotifierPath = execSync('which terminal-notifier', {
+			encoding: 'utf-8',
+			timeout: 2000,
+			stdio: ['pipe', 'pipe', 'pipe'],
+		}).trim();
+	} catch {
+		_terminalNotifierPath = null;
+	}
+	return _terminalNotifierPath;
+}
+
+function escapeAppleScript(str: string): string {
+	return str.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+function sendDarwin(title: string, message: string): void {
+	const tnPath = getTerminalNotifierPath();
+
+	if (tnPath) {
+		const args = ['-title', title, '-message', message];
+		const iconPath = getIconPath();
+		if (iconPath) {
+			args.push('-contentImage', iconPath);
+		}
+		if (_config.sound) {
+			args.push('-sound', 'default');
+		}
+		execFile(tnPath, args, () => {});
+		return;
+	}
+
+	// Hint once that terminal-notifier gives a better experience
+	if (!_terminalNotifierHinted) {
+		_terminalNotifierHinted = true;
+		logInfo(
+			'Install terminal-notifier for better notifications: brew install terminal-notifier',
+		);
+	}
+
+	// Fallback to osascript
+	const escapedTitle = escapeAppleScript(title);
+	const escapedMessage = escapeAppleScript(message);
+	const sound = _config.sound ? ' sound name "default"' : '';
+	const script = `display notification "${escapedMessage}" with title "${escapedTitle}"${sound}`;
+	execFile('osascript', ['-e', script], () => {});
+}
+
+function sendLinux(title: string, message: string): void {
+	const args: string[] = [];
+	const iconPath = getIconPath();
+	if (iconPath) {
+		args.push('-i', iconPath);
+	}
+	args.push(title, message);
+	execFile('notify-send', args, () => {});
+}
+
+function sendWindows(title: string, message: string): void {
+	const script = `
+Add-Type -AssemblyName System.Windows.Forms
+$notify = New-Object System.Windows.Forms.NotifyIcon
+$notify.Icon = [System.Drawing.SystemIcons]::Information
+$notify.BalloonTipTitle = '${title.replace(/'/g, "''")}'
+$notify.BalloonTipText = '${message.replace(/'/g, "''")}'
+$notify.Visible = $true
+$notify.ShowBalloonTip(5000)
+Start-Sleep -Seconds 1
+$notify.Dispose()
+`;
+	execFile('powershell', ['-NoProfile', '-Command', script], () => {});
+}
+
+// A terminal bell is delivered by the terminal emulator itself, so it still
+// lands over SSH or inside tmux where the desktop notifier daemons are not
+// reachable. BEL is non-printing, so writing it mid-render leaves Ink frames
+// intact.
+function ringTerminalBell(): void {
+	if (!process.stdout.isTTY) {
+		return;
+	}
+	try {
+		process.stdout.write('\x07');
+	} catch {
+		// stdout can already be closed during shutdown - a missed bell is harmless
+	}
+}
+
+function sendNativeNotification(title: string, message: string): void {
+	switch (process.platform) {
+		case 'darwin':
+			sendDarwin(title, message);
+			break;
+		case 'linux':
+			sendLinux(title, message);
+			break;
+		case 'win32':
+			sendWindows(title, message);
+			break;
+	}
+}
+
+export function sendNotification(event: NotificationEvent): void {
+	if (!_config.enabled) {
+		return;
+	}
+
+	if (!_config.events?.[event]) {
+		return;
+	}
+
+	const custom = _config.customMessages?.[event];
+	const projectName = basename(process.cwd());
+	const title = custom?.title ?? EVENT_MESSAGES[event].title(projectName);
+	const message = custom?.message ?? EVENT_MESSAGES[event].message;
+
+	// Daemon-side observability: the daemon redirects stdout to its log,
+	// so this lets `pdm daemon logs` confirm whether a notification
+	// was actually dispatched (vs. silently suppressed by config). In the
+	// TUI, stdout is captured by Ink so this is harmless.
+	if (process.env.PDM_DAEMON_PROCESS) {
+		console.log(`Notification fired: event=${event} title="${title}"`);
+	}
+
+	if (_config.bell) {
+		ringTerminalBell();
+	}
+
+	sendNativeNotification(title, message);
+}

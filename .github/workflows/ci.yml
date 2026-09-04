@@ -1,0 +1,66 @@
+name: CI
+
+# Build and test. This repo does not publish anything - no npm package, no
+# Homebrew tap, no Nix package - so this is the only check that runs.
+# It mirrors scripts/test.sh, minus the steps that need network or extra
+# tooling (test:audit, test:security).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    # Windows is a supported platform, so it is tested rather than assumed.
+    # The build script and every platform-sensitive module (shell spawning,
+    # config paths, clipboard, notifications) branch on `win32`; without a
+    # Windows runner nothing here would ever catch a regression in those.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # `biome check` covers formatting, lint and import sorting in one pass,
+      # so there is no separate lint step. It is platform-independent, so it
+      # only needs to run once.
+      - name: Format and lint
+        if: matrix.os == 'ubuntu-latest'
+        run: pnpm test:format
+
+      - name: Types
+        run: pnpm test:types
+
+      - name: Types (VS Code plugin)
+        if: matrix.os == 'ubuntu-latest'
+        run: pnpm test:types:vscode
+
+      - name: Build
+        run: pnpm build
+
+      - name: Tests
+        run: pnpm test:ava

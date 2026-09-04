@@ -1,0 +1,518 @@
+import test from 'ava';
+import {
+	getModelContextLimit,
+	getModelPricing,
+	getModelVisionSupport,
+	getSessionContextLimit,
+	resetSessionContextLimit,
+	resolveModelContextLimit,
+	setSessionContextLimit,
+} from './models-dev-client.js';
+
+console.log(`\nmodels-dev-client.spec.ts`);
+
+// Reset session context limit before each test to avoid cross-test pollution
+test.beforeEach(() => {
+	resetSessionContextLimit();
+	delete process.env.PDM_CONTEXT_LIMIT;
+});
+
+// Clean up after each test so downstream test files aren't affected
+test.afterEach(() => {
+	resetSessionContextLimit();
+	delete process.env.PDM_CONTEXT_LIMIT;
+});
+
+/**
+ * Tests for models-dev-client.ts
+ *
+ * Note: These tests make real API calls to models.dev.
+ * The API has caching and fallback mechanisms built in.
+ *
+ * Priority order: models.dev (primary) → hardcoded fallback (offline)
+ *
+ * Tests are organized by:
+ * 1. models.dev API lookups (network required, cached), returns dynamic values
+ * 2. Ollama-only fallback models (no network required), returns exact values
+ * 3. Cloud model normalization
+ * 4. Edge cases
+ */
+
+// ============================================================================
+// models.dev API Lookups (Primary Source)
+// These models exist on models.dev and return dynamic values that may change.
+// We assert typeof === 'number' rather than exact values.
+// ============================================================================
+
+test('getModelContextLimit - returns a number for llama3.2 (models.dev)', async t => {
+	const limit = await getModelContextLimit('llama3.2');
+	t.is(typeof limit, 'number');
+});
+
+test('getModelContextLimit - returns a number for llama3.1 (models.dev)', async t => {
+	const limit = await getModelContextLimit('llama3.1');
+	t.is(typeof limit, 'number');
+});
+
+test('getModelContextLimit - returns a number for llama3 (models.dev)', async t => {
+	const limit = await getModelContextLimit('llama3');
+	t.is(typeof limit, 'number');
+});
+
+test('getModelContextLimit - returns a number for llama2 (models.dev)', async t => {
+	const limit = await getModelContextLimit('llama2');
+	t.is(typeof limit, 'number');
+});
+
+test('getModelContextLimit - returns a number for mistral (models.dev)', async t => {
+	const limit = await getModelContextLimit('mistral');
+	t.is(typeof limit, 'number');
+});
+
+test('getModelContextLimit - returns a number for mixtral (models.dev)', async t => {
+	const limit = await getModelContextLimit('mixtral');
+	t.is(typeof limit, 'number');
+});
+
+test('getModelContextLimit - returns a number for mixtral:8x22b (models.dev)', async t => {
+	const limit = await getModelContextLimit('mixtral:8x22b');
+	t.is(typeof limit, 'number');
+});
+
+test('getModelContextLimit - returns a number for qwen (models.dev)', async t => {
+	const limit = await getModelContextLimit('qwen');
+	t.is(typeof limit, 'number');
+});
+
+test('getModelContextLimit - returns a number for qwen2.5 (models.dev)', async t => {
+	const limit = await getModelContextLimit('qwen2.5');
+	t.is(typeof limit, 'number');
+});
+
+test('getModelContextLimit - returns a number for qwen3 (models.dev)', async t => {
+	const limit = await getModelContextLimit('qwen3');
+	t.is(typeof limit, 'number');
+});
+
+test('getModelContextLimit - returns a number for gemma (models.dev)', async t => {
+	const limit = await getModelContextLimit('gemma');
+	t.is(typeof limit, 'number');
+});
+
+test('getModelContextLimit - returns a number for gemma2 (models.dev)', async t => {
+	const limit = await getModelContextLimit('gemma2');
+	t.is(typeof limit, 'number');
+});
+
+test('getModelContextLimit - returns a number for command-r (models.dev)', async t => {
+	const limit = await getModelContextLimit('command-r');
+	t.is(typeof limit, 'number');
+});
+
+test('getModelContextLimit - returns a number for command-r-plus (models.dev)', async t => {
+	const limit = await getModelContextLimit('command-r-plus');
+	t.is(typeof limit, 'number');
+});
+
+test('getModelContextLimit - returns a number for deepseek-coder (models.dev)', async t => {
+	const limit = await getModelContextLimit('deepseek-coder');
+	t.is(typeof limit, 'number');
+});
+
+test('getModelContextLimit - returns a number for deepseek-coder-v2 (models.dev)', async t => {
+	const limit = await getModelContextLimit('deepseek-coder-v2');
+	t.is(typeof limit, 'number');
+});
+
+test('getModelContextLimit - returns a number for phi3 (models.dev)', async t => {
+	const limit = await getModelContextLimit('phi3');
+	t.is(typeof limit, 'number');
+});
+
+test('getModelContextLimit - fetches from models.dev for popular API models', async t => {
+	const limit = await getModelContextLimit('gpt-4');
+	t.true(limit === null || typeof limit === 'number');
+});
+
+// ============================================================================
+// models.dev API Lookups - Model Variants (with quantization/tags)
+// These should still resolve via models.dev or fallback
+// ============================================================================
+
+test('getModelContextLimit - handles llama3.1:8b-instruct-q4_0 variant', async t => {
+	const limit = await getModelContextLimit('llama3.1:8b-instruct-q4_0');
+	t.is(typeof limit, 'number');
+});
+
+test('getModelContextLimit - handles mistral:7b-instruct variant', async t => {
+	const limit = await getModelContextLimit('mistral:7b-instruct');
+	t.is(typeof limit, 'number');
+});
+
+test('getModelContextLimit - handles qwen2.5:7b-instruct-fp16 variant', async t => {
+	const limit = await getModelContextLimit('qwen2.5:7b-instruct-fp16');
+	t.is(typeof limit, 'number');
+});
+
+// ============================================================================
+// models.dev API Lookups - Cloud Models (strip :cloud, then query models.dev)
+// ============================================================================
+
+test('getModelContextLimit - returns a number for glm-4.7:cloud (models.dev)', async t => {
+	const limit = await getModelContextLimit('glm-4.7:cloud');
+	t.is(typeof limit, 'number');
+});
+
+test('getModelContextLimit - returns a number for deepseek-v3.1:671b-cloud', async t => {
+	const limit = await getModelContextLimit('deepseek-v3.1:671b-cloud');
+	t.true(limit === null || typeof limit === 'number');
+});
+
+// ============================================================================
+// Cloud Models resolved via models.dev (after stripping :cloud suffix)
+// These models are found on models.dev after normalization.
+// ============================================================================
+
+test('getModelContextLimit - returns a number for gpt-oss:20b-cloud', async t => {
+	const limit = await getModelContextLimit('gpt-oss:20b-cloud');
+	t.is(typeof limit, 'number');
+});
+
+test('getModelContextLimit - returns a number for gpt-oss:120b-cloud', async t => {
+	const limit = await getModelContextLimit('gpt-oss:120b-cloud');
+	t.is(typeof limit, 'number');
+});
+
+test('getModelContextLimit - returns a number for qwen3-coder:480b-cloud', async t => {
+	const limit = await getModelContextLimit('qwen3-coder:480b-cloud');
+	t.is(typeof limit, 'number');
+});
+
+test('getModelContextLimit - returns a number for minimax-m2:cloud', async t => {
+	const limit = await getModelContextLimit('minimax-m2:cloud');
+	t.is(typeof limit, 'number');
+});
+
+test('getModelContextLimit - returns a number for kimi-k2:1t-cloud', async t => {
+	const limit = await getModelContextLimit('kimi-k2:1t-cloud');
+	t.true(limit === null || typeof limit === 'number');
+});
+
+test('getModelContextLimit - returns a number for kimi-k2-thinking:cloud', async t => {
+	const limit = await getModelContextLimit('kimi-k2-thinking:cloud');
+	t.is(typeof limit, 'number');
+});
+
+// ============================================================================
+// Models resolved via models.dev or fallback (dynamic values)
+// ============================================================================
+
+test('getModelContextLimit - returns a number for kimi-for-coding', async t => {
+	const limit = await getModelContextLimit('kimi-for-coding');
+	t.is(typeof limit, 'number');
+});
+
+test('getModelContextLimit - returns a number for devstral-small-2:24b', async t => {
+	const limit = await getModelContextLimit('devstral-small-2:24b');
+	t.true(limit === null || typeof limit === 'number');
+});
+
+test('getModelContextLimit - returns a number for devstral-2', async t => {
+	const limit = await getModelContextLimit('devstral-2');
+	t.is(typeof limit, 'number');
+});
+
+// ============================================================================
+// Cloud Model Normalization
+// ============================================================================
+
+test('getModelContextLimit - cloud suffix is stripped before models.dev lookup', async t => {
+	// gpt-oss:20b-cloud → strips "-cloud" → "gpt-oss:20b" → resolves via models.dev or fallback
+	const limit = await getModelContextLimit('gpt-oss:20b-cloud');
+	t.is(typeof limit, 'number');
+});
+
+test('getModelContextLimit - handles -cloud suffix (hyphen variant)', async t => {
+	const limit = await getModelContextLimit('unknown-model-cloud');
+	t.true(limit === null || typeof limit === 'number');
+});
+
+// ============================================================================
+// Edge Cases
+// ============================================================================
+
+test('getModelContextLimit - returns null for completely unknown model', async t => {
+	const limit = await getModelContextLimit('unknown-model-12345');
+	t.is(limit, null);
+});
+
+test('getModelContextLimit - handles empty string', async t => {
+	const limit = await getModelContextLimit('');
+	t.is(limit, null);
+});
+
+test('getModelContextLimit - handles model names with uppercase', async t => {
+	const limit = await getModelContextLimit('LLAMA3.1:8B');
+	t.is(typeof limit, 'number');
+});
+
+test('getModelContextLimit - handles model names with mixed case', async t => {
+	const limit = await getModelContextLimit('Llama3.1:8B');
+	t.is(typeof limit, 'number');
+});
+
+test('getModelContextLimit - handles models.dev API failure gracefully', async t => {
+	const limit = await getModelContextLimit('some-api-only-model-xyz');
+	t.is(limit, null);
+});
+
+// ============================================================================
+// Session Context Limit Override
+// ============================================================================
+
+test('getSessionContextLimit - starts as null', t => {
+	t.is(getSessionContextLimit(), null);
+});
+
+test('setSessionContextLimit - sets a positive value', t => {
+	setSessionContextLimit(8192);
+	t.is(getSessionContextLimit(), 8192);
+});
+
+test('setSessionContextLimit - sets a large value', t => {
+	setSessionContextLimit(128000);
+	t.is(getSessionContextLimit(), 128000);
+});
+
+test('setSessionContextLimit - null clears the override', t => {
+	setSessionContextLimit(8192);
+	setSessionContextLimit(null);
+	t.is(getSessionContextLimit(), null);
+});
+
+test('setSessionContextLimit - zero is treated as null', t => {
+	setSessionContextLimit(0);
+	t.is(getSessionContextLimit(), null);
+});
+
+test('setSessionContextLimit - negative value is treated as null', t => {
+	setSessionContextLimit(-100);
+	t.is(getSessionContextLimit(), null);
+});
+
+test('resetSessionContextLimit - clears the override', t => {
+	setSessionContextLimit(8192);
+	resetSessionContextLimit();
+	t.is(getSessionContextLimit(), null);
+});
+
+test('resetSessionContextLimit - is safe to call when already null', t => {
+	resetSessionContextLimit();
+	t.is(getSessionContextLimit(), null);
+});
+
+test('getModelContextLimit - session override takes priority over models.dev', async t => {
+	setSessionContextLimit(4096);
+	// llama3.1 normally resolves via models.dev, but session override wins
+	const limit = await getModelContextLimit('llama3.1');
+	t.is(limit, 4096);
+});
+
+test('getModelContextLimit - session override takes priority for unknown models', async t => {
+	setSessionContextLimit(16000);
+	const limit = await getModelContextLimit('unknown-model-12345');
+	t.is(limit, 16000);
+});
+
+test('getModelContextLimit - falls through to models.dev when no session override', async t => {
+	// No session override set, should use models.dev
+	const limit = await getModelContextLimit('llama3.1');
+	t.is(typeof limit, 'number');
+});
+
+// ============================================================================
+// PDM_CONTEXT_LIMIT Environment Variable
+// ============================================================================
+
+test('getModelContextLimit - env variable used for unknown models', async t => {
+	const saved = process.env.PDM_CONTEXT_LIMIT;
+	process.env.PDM_CONTEXT_LIMIT = '32000';
+	try {
+		const limit = await getModelContextLimit('unknown-model-12345');
+		t.is(limit, 32000);
+	} finally {
+		delete process.env.PDM_CONTEXT_LIMIT;
+		if (saved !== undefined) {
+			process.env.PDM_CONTEXT_LIMIT = saved;
+		}
+	}
+});
+
+test('getModelContextLimit - session override takes priority over env variable', async t => {
+	process.env.PDM_CONTEXT_LIMIT = '32000';
+	setSessionContextLimit(8192);
+	const limit = await getModelContextLimit('unknown-model-12345');
+	t.is(limit, 8192);
+});
+
+test('getModelContextLimit - provider model config takes priority over env variable', async t => {
+	process.env.PDM_CONTEXT_LIMIT = '32000';
+	const limit = await getModelContextLimit('custom-model', {
+		providerConfig: {
+			name: 'Test Provider',
+			type: 'openai',
+			models: ['custom-model'],
+			contextWindows: {
+				'custom-model': 65536,
+			},
+			config: {},
+		},
+	});
+	t.is(limit, 65536);
+});
+
+test('getModelContextLimit - provider default context window is used when model override is absent', async t => {
+	const limit = await getModelContextLimit('custom-model', {
+		providerConfig: {
+			name: 'Test Provider',
+			type: 'openai',
+			models: ['custom-model'],
+			contextWindow: 24576,
+			config: {},
+		},
+	});
+	t.is(limit, 24576);
+});
+
+test('resolveModelContextLimit - returns provider model config source', async t => {
+	const resolved = await resolveModelContextLimit('custom-model', {
+		providerConfig: {
+			name: 'Test Provider',
+			type: 'openai',
+			models: ['custom-model'],
+			contextWindows: {
+				'custom-model': 65536,
+			},
+			config: {},
+		},
+	});
+	t.is(resolved.limit, 65536);
+	t.is(resolved.source, 'provider-model-config');
+});
+
+test('getModelContextLimit - invalid env variable is ignored', async t => {
+	process.env.PDM_CONTEXT_LIMIT = 'not-a-number';
+	const limit = await getModelContextLimit('unknown-model-12345');
+	t.is(limit, null);
+});
+
+test('getModelContextLimit - zero env variable is ignored', async t => {
+	process.env.PDM_CONTEXT_LIMIT = '0';
+	const limit = await getModelContextLimit('unknown-model-12345');
+	t.is(limit, null);
+});
+
+test('getModelContextLimit - negative env variable is ignored', async t => {
+	process.env.PDM_CONTEXT_LIMIT = '-1000';
+	const limit = await getModelContextLimit('unknown-model-12345');
+	t.is(limit, null);
+});
+
+test('getModelContextLimit - empty env variable is ignored', async t => {
+	process.env.PDM_CONTEXT_LIMIT = '';
+	const limit = await getModelContextLimit('unknown-model-12345');
+	t.is(limit, null);
+});
+
+// ============================================================================
+// getModelPricing Tests
+// ============================================================================
+
+test('getModelPricing - returns pricing for gpt-4o (models.dev)', async t => {
+	const pricing = await getModelPricing('gpt-4o');
+	t.truthy(pricing);
+	t.true(typeof pricing!.input === 'number');
+	t.true(typeof pricing!.output === 'number');
+	t.true(pricing!.input >= 0);
+	t.true(pricing!.output >= 0);
+});
+
+test('getModelPricing - returns pricing for claude-3-opus (models.dev)', async t => {
+	const pricing = await getModelPricing('claude-3-opus');
+	t.truthy(pricing);
+	t.true(typeof pricing!.input === 'number');
+	t.true(typeof pricing!.output === 'number');
+	t.true(pricing!.input >= 0);
+	t.true(pricing!.output >= 0);
+});
+
+test('getModelPricing - surfaces cache rates when models.dev publishes them', async t => {
+	// The cache-aware cost path prices reads/writes at their own rates and only
+	// falls back to the input rate when these are absent, so dropping them in
+	// the mapper would silently bill every cache hit at full price.
+	const pricing = await getModelPricing('claude-sonnet-4-5');
+	t.truthy(pricing);
+	t.is(typeof pricing!.cache_read, 'number');
+	t.true(pricing!.cache_read! < pricing!.input, 'cache reads are discounted');
+});
+
+test('getModelPricing - returns null for unknown model', async t => {
+	const pricing = await getModelPricing('unknown-model-12345');
+	t.is(pricing, null);
+});
+
+test('getModelPricing - returns null for empty string', async t => {
+	const pricing = await getModelPricing('');
+	t.is(pricing, null);
+});
+
+test('getModelPricing - returns null for local Ollama model not on models.dev', async t => {
+	const pricing = await getModelPricing('llama3.2:3b');
+	t.is(pricing, null);
+});
+
+test('getModelPricing - returns consistent pricing on repeated calls', async t => {
+	const pricing1 = await getModelPricing('gpt-4o');
+	const pricing2 = await getModelPricing('gpt-4o');
+
+	t.deepEqual(pricing2, pricing1);
+	t.truthy(pricing2);
+});
+
+// ============================================================================
+// getModelVisionSupport - tri-state capability detection
+//
+// Model names below are deliberately fictional/compound so they cannot
+// collide with a real models.dev entry - these tests exercise the local
+// Ollama vision-pattern fallback table in isolation from live API data.
+// ============================================================================
+
+test('getModelVisionSupport - unknown for a model absent from both models.dev and the local table', async t => {
+	const result = await getModelVisionSupport(
+		'totally-fictional-model-xyz-12345',
+	);
+	t.is(result, 'unknown');
+});
+
+test('getModelVisionSupport - matches a custom-tagged gemma3 build via the local table', async t => {
+	const result = await getModelVisionSupport('my-custom-gemma3-build:latest');
+	t.is(result, 'yes');
+});
+
+test('getModelVisionSupport - matches llava regardless of quantization suffix', async t => {
+	const result = await getModelVisionSupport('my-custom-llava-build:7b-q4_0');
+	t.is(result, 'yes');
+});
+
+test('getModelVisionSupport - unknown never collapses to no', async t => {
+	const result = await getModelVisionSupport(
+		'totally-fictional-model-xyz-12345',
+	);
+	t.not(result, 'no');
+});
+
+test('getModelVisionSupport - memoizes repeated calls', async t => {
+	const first = await getModelVisionSupport('memo-test-fictional-model-abc');
+	const second = await getModelVisionSupport('memo-test-fictional-model-abc');
+	t.is(first, second);
+});

@@ -1,0 +1,53 @@
+{
+	"compilerOptions": {
+		"target": "ES2022",
+		"lib": ["ES2022"],
+		"module": "ESNext",
+		"moduleResolution": "bundler",
+		"outDir": "dist",
+		"rootDir": "source",
+		"strict": true,
+		"esModuleInterop": true,
+		"allowSyntheticDefaultImports": true,
+		"skipLibCheck": true,
+		"forceConsistentCasingInFileNames": true,
+		"jsx": "react-jsx",
+		"declaration": true,
+		"declarationMap": true,
+		"sourceMap": true,
+		"types": ["node"],
+		"paths": {
+			"@/*": ["./source/*"],
+			// The real `vscode` module only exists inside the extension host, so
+			// AVA (which loads specs through tsx, and tsx honours these paths)
+			// resolves it to a stub. Test-only: the extension is bundled from
+			// plugins/vscode/tsconfig.json with `--external:vscode`, and nothing
+			// under source/ imports it.
+			"vscode": ["./plugins/vscode/test-stubs/vscode.ts"]
+		}
+	},
+	"include": ["source/**/*"],
+	"exclude": [
+		"dist",
+		"node_modules",
+		"source/**/__tests__/**/*",
+		"source/**/*.spec.tsx",
+		"source/**/*.spec.ts"
+	],
+	"ts-node": {
+		"esm": true,
+		"experimentalSpecifierResolution": "node",
+		"compilerOptions": {
+			"module": "ESNext",
+			"moduleResolution": "node"
+		}
+	},
+	"tsc-alias": {
+		"resolveFullPaths": true,
+		"replacers": {
+			"default": {
+				"enabled": true
+			}
+		}
+	}
+}

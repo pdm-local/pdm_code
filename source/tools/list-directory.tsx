@@ -1,0 +1,363 @@
+import {lstat, readdir} from 'node:fs/promises';
+import {join, relative} from 'node:path';
+import {Box, Text} from 'ink';
+import React from 'react';
+import ToolMessage from '@/components/tool-message';
+import {MAX_LIST_DEPTH, MAX_LIST_ENTRIES} from '@/constants';
+import {ThemeContext} from '@/hooks/useTheme';
+import {getProjectRoot, getSafeSessionCwd} from '@/services/session-cwd';
+import type {PdmCodeToolExport} from '@/types/core';
+import {jsonSchema, tool} from '@/types/core';
+import {formatError} from '@/utils/error-formatter';
+import {loadGitignore} from '@/utils/gitignore-loader';
+import {isValidFilePath, resolveFilePath} from '@/utils/path-validation';
+import {calculateTokens} from '@/utils/token-calculator';
+
+interface ListDirectoryArgs {
+	path?: string;
+	recursive?: boolean;
+	maxDepth?: number;
+	tree?: boolean;
+	showHiddenFiles?: boolean;
+	showSizes?: boolean;
+}
+
+interface DirectoryEntry {
+	name: string;
+	relativePath: string;
+	type: 'file' | 'directory' | 'symlink';
+	size?: number;
+}
+
+const executeListDirectory = async (
+	args: ListDirectoryArgs,
+): Promise<string> => {
+	const dirPath = args.path || '.';
+	const recursive = args.recursive ?? false;
+	// Clamped to the range the schema advertises (min 1, max 10). The model
+	// supplies this value, and an unclamped `maxDepth: 1000` with recursive:true
+	// walks the entire repository.
+	const maxDepth = Math.min(Math.max(args.maxDepth ?? 3, 1), MAX_LIST_DEPTH);
+	const tree = args.tree ?? false;
+	const showHiddenFiles = args.showHiddenFiles ?? false;
+	const showSizes = args.showSizes ?? false;
+
+	// Validate path
+	const cwd = getSafeSessionCwd();
+	const root = getProjectRoot();
+	if (!isValidFilePath(dirPath, root)) {
+		throw new Error(
+			`⚒ Invalid path. Path must be within the project directory.`,
+		);
+	}
+
+	const resolvedPath = resolveFilePath(dirPath, cwd, root);
+	// Load from the project root so root-level rules still apply after a `cd`
+	// into a subdir; entries are matched root-relative below.
+	const ig = loadGitignore(root);
+
+	try {
+		const entries: DirectoryEntry[] = [];
+
+		// Set when the entry cap is hit, so the output can say so rather than
+		// silently presenting a partial listing as complete.
+		let truncated = false;
+
+		const walkDirectory = async (
+			currentPath: string,
+			relativeTo: string,
+			depth: number,
+		): Promise<void> => {
+			if (depth > maxDepth || truncated) return;
+
+			try {
+				const items = await readdir(currentPath, {withFileTypes: true});
+
+				for (const item of items) {
+					// Skip hidden files unless showHiddenFiles is true
+					if (
+						!showHiddenFiles &&
+						item.name.startsWith('.') &&
+						!dirPath.startsWith('.')
+					) {
+						continue;
+					}
+
+					const fullPath = join(currentPath, item.name);
+
+					// Check if this item should be ignored using gitignore patterns.
+					// Match root-relative so the project-root .gitignore applies.
+					if (ig.ignores(relative(root, fullPath))) {
+						continue;
+					}
+
+					let type: 'file' | 'directory' | 'symlink' = 'file';
+					if (item.isSymbolicLink()) {
+						type = 'symlink';
+					} else if (item.isDirectory()) {
+						type = 'directory';
+					}
+
+					const relativePath = join(relativeTo, item.name);
+
+					// Only get stats for files (to get size), and only when sizes
+					// were requested, lstat is a syscall per file, not worth
+					// paying for on every listing.
+					let size: number | undefined;
+					if (type === 'file' && showSizes) {
+						try {
+							const stats = await lstat(fullPath);
+							size = stats.size;
+						} catch {
+							// Skip files we can't stat
+							size = undefined;
+						}
+					}
+
+					entries.push({
+						name: item.name,
+						relativePath,
+						type,
+						size,
+					});
+
+					// Without a cap a recursive listing of a large tree returns
+					// megabytes straight into the model's context.
+					if (entries.length >= MAX_LIST_ENTRIES) {
+						truncated = true;
+						return;
+					}
+
+					// Recurse into directories if enabled
+					if (recursive && item.isDirectory() && depth < maxDepth) {
+						await walkDirectory(fullPath, relativePath, depth + 1);
+						if (truncated) return;
+					}
+				}
+			} catch (error: unknown) {
+				if (
+					error instanceof Error &&
+					'code' in error &&
+					error.code === 'EACCES'
+				) {
+					// Skip directories we can't read
+					return;
+				}
+				throw error;
+			}
+		};
+
+		await walkDirectory(resolvedPath, '', 0);
+
+		if (entries.length === 0) {
+			return `Directory "${dirPath}" is empty`;
+		}
+
+		// Sort directories first, then files, alphabetically
+		entries.sort((a, b) => {
+			if (a.type === 'directory' && b.type !== 'directory') return -1;
+			if (a.type !== 'directory' && b.type === 'directory') return 1;
+			return a.relativePath.localeCompare(b.relativePath);
+		});
+
+		// Format output
+		let output = `Directory contents for "${dirPath}":\n\n`;
+
+		if (tree) {
+			// Tree format: flat paths, one per line
+			for (const entry of entries) {
+				output += `${entry.relativePath}\n`;
+			}
+		} else {
+			// Standard format: directories get a trailing "/", symlinks "@" (ls -F style)
+			for (const entry of entries) {
+				const suffix =
+					entry.type === 'directory'
+						? '/'
+						: entry.type === 'symlink'
+							? '@'
+							: '';
+				const displayPath = recursive ? entry.relativePath : entry.name;
+				const sizeStr = entry.size ? ` (${entry.size} bytes)` : '';
+				output += `${displayPath}${suffix}${sizeStr}\n`;
+			}
+		}
+
+		if (recursive && entries.length > 0) {
+			output += `\n[Recursive: showing entries up to depth ${maxDepth}]`;
+		}
+
+		if (truncated) {
+			output += `\n[Truncated at ${MAX_LIST_ENTRIES} entries. Narrow the path, lower maxDepth, or use find_files with a pattern.]`;
+		}
+
+		if (tree) {
+			output += `\n[Tree format: flat paths]`;
+		}
+
+		return output;
+	} catch (error: unknown) {
+		if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
+			throw new Error(`Directory "${dirPath}" does not exist`);
+		}
+		const errorMessage = formatError(error);
+		throw new Error(`Failed to list directory: ${errorMessage}`);
+	}
+};
+
+const listDirectoryCoreTool = tool({
+	description:
+		"List directory contents. Use this INSTEAD OF bash ls/ls -la/ls -R commands. Use recursive=true with maxDepth for nested exploration. Use tree=true for flat paths (easier to parse). Use showSizes=true to include file sizes (off by default; use read_file with metadata_only=true for a single file's size instead). Best for: exploring unknown directories, understanding project structure. For finding specific files by pattern, use find_files instead.",
+	inputSchema: jsonSchema<ListDirectoryArgs>({
+		type: 'object',
+		properties: {
+			path: {
+				type: 'string',
+				description:
+					'Directory path to list (default: "." current directory). Examples: ".", "src", "source/tools"',
+			},
+			recursive: {
+				type: 'boolean',
+				description:
+					'If true, recursively list subdirectories (default: false)',
+			},
+			maxDepth: {
+				type: 'number',
+				description:
+					'Maximum recursion depth when recursive=true (default: 3, min: 1, max: 10)',
+			},
+			tree: {
+				type: 'boolean',
+				description:
+					'If true, show flat paths output (one per line) instead of formatted tree. Great for LLM to see project structure.',
+			},
+			showHiddenFiles: {
+				type: 'boolean',
+				description:
+					'If true, include hidden files and directories (default: false). Use with caution to avoid exposing sensitive files like .env.',
+			},
+			showSizes: {
+				type: 'boolean',
+				description:
+					"If true, include each file's size in bytes (default: false). Rarely needed just to orient in a directory; costs an extra stat call per file plus output tokens.",
+			},
+		},
+		required: [],
+	}),
+	execute: async (args, _options) => {
+		return await executeListDirectory(args);
+	},
+});
+
+interface ListDirectoryFormatterProps {
+	args: ListDirectoryArgs;
+	result?: string;
+	tokens?: number;
+}
+
+const ListDirectoryFormatter = React.memo(
+	({args, result, tokens}: ListDirectoryFormatterProps) => {
+		const themeContext = React.useContext(ThemeContext);
+		if (!themeContext) {
+			throw new Error('ThemeContext not found');
+		}
+		const {colors} = themeContext;
+
+		// Parse result to extract entry count
+		let entryCount = 0;
+		if (
+			result &&
+			!result.startsWith('Error:') &&
+			!result.includes('is empty')
+		) {
+			const lines = result.split('\n');
+			for (const line of lines) {
+				// Count entry lines (skip the header, blank lines, and bracketed notes)
+				const trimmed = line.trim();
+				if (
+					trimmed &&
+					!trimmed.startsWith('[') &&
+					!trimmed.startsWith('Directory')
+				) {
+					entryCount++;
+				}
+			}
+		}
+
+		const messageContent = (
+			<Box flexDirection="column">
+				<Text color={colors.tool}>⚒ list_directory</Text>
+
+				<Box>
+					<Text color={colors.secondary}>Path: </Text>
+					<Text wrap="truncate-end" color={colors.text}>
+						{args.path || '.'}
+					</Text>
+				</Box>
+
+				{entryCount > 0 && (
+					<Box>
+						<Text color={colors.secondary}>Entries: </Text>
+						<Text color={colors.text}>{entryCount}</Text>
+					</Box>
+				)}
+
+				{args.recursive && (
+					<Box>
+						<Text color={colors.secondary}>Recursive: </Text>
+						<Text color={colors.text}>
+							yes (max depth: {args.maxDepth ?? 3})
+						</Text>
+					</Box>
+				)}
+
+				{args.tree && (
+					<Box>
+						<Text color={colors.secondary}>Format: </Text>
+						<Text color={colors.text}>tree</Text>
+					</Box>
+				)}
+
+				{args.showHiddenFiles && (
+					<Box>
+						<Text color={colors.secondary}>Hidden files: </Text>
+						<Text color={colors.text}>shown</Text>
+					</Box>
+				)}
+
+				{tokens !== undefined && tokens > 0 && (
+					<Box>
+						<Text color={colors.secondary}>Tokens: </Text>
+						<Text color={colors.text}>~{tokens.toLocaleString()}</Text>
+					</Box>
+				)}
+			</Box>
+		);
+
+		return <ToolMessage message={messageContent} hideBox={true} />;
+	},
+);
+
+const listDirectoryFormatter = (
+	args: ListDirectoryArgs,
+	result?: string,
+): React.ReactElement => {
+	if (result && result.startsWith('Error:')) {
+		return <></>;
+	}
+
+	// Calculate tokens from the result
+	let tokens = 0;
+	if (result) {
+		tokens = calculateTokens(result);
+	}
+
+	return <ListDirectoryFormatter args={args} result={result} tokens={tokens} />;
+};
+
+export const listDirectoryTool: PdmCodeToolExport = {
+	name: 'list_directory' as const,
+	tool: listDirectoryCoreTool,
+	formatter: listDirectoryFormatter,
+	readOnly: true,
+};

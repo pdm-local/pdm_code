@@ -1,0 +1,421 @@
+import * as vscode from 'vscode';
+import * as path from 'path';
+import {WebSocketClient} from './websocket-client';
+import {DiffManager} from './diff-manager';
+import {
+	ServerMessage,
+	FileChangeMessage,
+	CloseDiffMessage,
+	DiagnosticInfo,
+	OpenFileMessage,
+} from './protocol';
+import {AcpStateManager, ACPStatus} from './acp-state';
+import {PdmCodeAcpClient} from './acp-client';
+import {AcpProcessManager} from './acp-process-manager';
+import {ChatWebviewProvider} from './chat-webview-provider';
+import {
+	PdmCodeCodeLensProvider,
+	sendCodeLensPrompt,
+} from './code-lens-provider';
+
+const DEFAULT_PORT = 51820;
+const ACTIVE_EDITOR_DEBOUNCE_MS = 150;
+
+let wsClient: WebSocketClient;
+let diffManager: DiffManager;
+let acpStateManager: AcpStateManager;
+let acpClient: PdmCodeAcpClient;
+let acpProcessManager: AcpProcessManager;
+let statusBarItem: vscode.StatusBarItem;
+let outputChannel: vscode.OutputChannel;
+let activeEditorDebounce: NodeJS.Timeout | null = null;
+let lastActiveEditorPayload: string | null = null;
+
+export function activate(context: vscode.ExtensionContext) {
+	outputChannel = vscode.window.createOutputChannel('PDM Code');
+	outputChannel.appendLine('PDM Code extension activating...');
+
+	// Initialize components
+	wsClient = new WebSocketClient(outputChannel);
+	diffManager = new DiffManager(context);
+
+	// Initialize ACP components
+	acpStateManager = new AcpStateManager();
+	acpClient = new PdmCodeAcpClient(outputChannel, acpStateManager);
+	acpProcessManager = new AcpProcessManager(outputChannel, acpStateManager, acpClient);
+
+	// Start the ACP process side-by-side with the companion mode
+	acpProcessManager.start();
+
+	// Create status bar item
+	statusBarItem = vscode.window.createStatusBarItem(
+		vscode.StatusBarAlignment.Right,
+		100);
+	statusBarItem.command = 'pdm.connect';
+	updateStatusBar(false);
+	statusBarItem.show();
+
+	// Register Webview Provider
+	const chatProvider = new ChatWebviewProvider(context.extensionUri, outputChannel, acpClient, diffManager);
+	context.subscriptions.push(
+		chatProvider,
+		vscode.window.registerWebviewViewProvider(ChatWebviewProvider.viewType, chatProvider, {
+			// Preserve DOM when user switches to Explorer/SCM/etc. and back.
+			// Without this VS Code destroys the webview on hide, wiping the transcript.
+			webviewOptions: {retainContextWhenHidden: true},
+		})
+	);
+
+	// Register Title Bar Actions
+	context.subscriptions.push(
+		vscode.commands.registerCommand('pdm.toggleHistory', () => {
+			chatProvider.toggleHistory();
+		}),
+		vscode.commands.registerCommand('pdm.toggleSettings', () => {
+			chatProvider.toggleSettings();
+		})
+	);
+
+	// Handle messages from CLI
+	wsClient.onMessage((message: ServerMessage) => handleServerMessage(message));
+
+	// Register commands
+	context.subscriptions.push(
+		vscode.commands.registerCommand('pdm.connect', connect),
+		vscode.commands.registerCommand('pdm.disconnect', disconnect),
+		vscode.commands.registerCommand('pdm.startCli', startCli),
+		vscode.commands.registerCommand('pdm.restartAcp', () => {
+			outputChannel.appendLine('Manually restarting ACP process...');
+			acpProcessManager.dispose();
+			
+			// DO NOT recreate acpStateManager or acpClient, as the ChatWebviewProvider
+			// is permanently bound to the original instances.
+			acpProcessManager = new AcpProcessManager(outputChannel, acpStateManager, acpClient);
+			acpProcessManager.start();
+		}),
+		vscode.commands.registerCommand('pdm.openConfig', async () => {
+			const config = vscode.workspace.getConfiguration('pdm');
+			const cwdSetting = config.get<string>('cwd') || (vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd());
+			const configPath = path.join(cwdSetting, 'agents.config.json');
+			try {
+				const doc = await vscode.workspace.openTextDocument(configPath);
+				await vscode.window.showTextDocument(doc);
+			} catch (err) {
+				vscode.window.showErrorMessage(`Could not open configuration at ${configPath}. Ensure the file exists.`);
+			}
+		}),
+		vscode.commands.registerCommand('pdm.newChat', () => {
+			acpClient.newChat();
+			chatProvider.resetSessionState();
+			chatProvider.postMessage({type: 'clear'});
+			chatProvider.postMessage({type: 'updateTimeline', entries: []});
+			outputChannel.appendLine('[Extension] New chat started, session cleared.');
+		}),
+		vscode.commands.registerCommand('pdm.cancel', () => {
+			outputChannel.appendLine('[Extension] Cancel requested.');
+			void acpClient.cancel();
+    }),
+		vscode.commands.registerCommand('pdm.copyLastCodeBlock', () => {
+			chatProvider.requestCopyLastCodeBlock();
+		}));
+
+	// Inline "Explain Code" / "Generate Tests" links above every function and
+	// class, so a symbol can be handed to the agent without leaving the editor.
+	const codeLensProvider = new PdmCodeCodeLensProvider();
+	context.subscriptions.push(
+		codeLensProvider,
+		vscode.languages.registerCodeLensProvider({scheme: 'file'}, codeLensProvider),
+		vscode.workspace.onDidChangeConfiguration(event => {
+			if (event.affectsConfiguration('pdm.codeLens')) {
+				codeLensProvider.refresh();
+			}
+		}),
+		vscode.commands.registerCommand('pdm.explainCode', (uri?: vscode.Uri, range?: vscode.Range) =>
+			sendCodeLensPrompt(chatProvider, 'Explain what this code does.', uri, range)),
+		vscode.commands.registerCommand('pdm.generateTests', (uri?: vscode.Uri, range?: vscode.Range) =>
+			sendCodeLensPrompt(chatProvider, 'Write unit tests for this code.', uri, range)));
+
+	// Push active editor state to the CLI so the input box can show an
+	// "In <file>" pill and auto-attach a selection as context on submit.
+	context.subscriptions.push(
+		vscode.window.onDidChangeActiveTextEditor(() => scheduleActiveEditorSend()),
+		vscode.window.onDidChangeTextEditorSelection(event => {
+			if (event.textEditor === vscode.window.activeTextEditor) {
+				scheduleActiveEditorSend();
+			}
+		}));
+
+	// Auto-connect if configured
+	const config = vscode.workspace.getConfiguration('pdm');
+	if (config.get<boolean>('autoConnect', true)) {
+		setTimeout(() => connect(), 1000);
+	}
+
+	context.subscriptions.push(
+		statusBarItem,
+		outputChannel,
+		{dispose: () => wsClient.disconnect()},
+		{dispose: () => diffManager.dispose()},
+		{dispose: () => acpProcessManager.dispose()});
+
+	outputChannel.appendLine('PDM Code extension activated');
+}
+
+export function deactivate() {
+	wsClient?.disconnect();
+	diffManager?.dispose();
+}
+
+// Connection management
+async function connect(): Promise<void> {
+	const config = vscode.workspace.getConfiguration('pdm');
+	const port = config.get<number>('serverPort', DEFAULT_PORT);
+
+	updateStatusBar(false, 'Connecting...');
+
+	const connected = await wsClient.connect(port);
+
+	if (connected) {
+		updateStatusBar(true);
+		sendWorkspaceContext();
+		sendActiveEditor();
+		vscode.window.showInformationMessage('Connected to PDM Code CLI');
+	} else {
+		updateStatusBar(false);
+		const action = await vscode.window.showWarningMessage(
+			'Could not connect to PDM Code CLI. Is it running?',
+			'Start CLI',
+			'Retry');
+		if (action === 'Start CLI') {
+			startCli();
+		} else if (action === 'Retry') {
+			connect();
+		}
+	}
+}
+
+function disconnect(): void {
+	wsClient.disconnect();
+	updateStatusBar(false);
+	vscode.window.showInformationMessage('Disconnected from PDM Code CLI');
+}
+
+// Status bar updates
+function updateStatusBar(connected: boolean, text?: string): void {
+	if (text) {
+		statusBarItem.text = `$(sync~spin) ${text}`;
+	} else if (connected) {
+		statusBarItem.text = '$(check) PDM Code';
+		statusBarItem.tooltip = 'Connected to PDM Code CLI';
+		statusBarItem.command = 'pdm.disconnect';
+	} else {
+		statusBarItem.text = '$(plug) PDM Code';
+		statusBarItem.tooltip = 'Click to connect to PDM Code CLI';
+		statusBarItem.command = 'pdm.connect';
+	}
+}
+
+// Message handling
+function handleServerMessage(message: ServerMessage): void {
+	switch (message.type) {
+		case 'file_change':
+			handleFileChange(message);
+			break;
+		case 'close_diff':
+			handleCloseDiff(message);
+			break;
+		case 'open_file':
+			handleOpenFile(message);
+			break;
+		case 'status':
+			if (message.model) {
+				statusBarItem.text = `$(check) ${message.model}`;
+			}
+			break;
+		case 'connection_ack':
+			outputChannel.appendLine(
+				`Connected to CLI v${message.cliVersion} (protocol v${message.protocolVersion})`);
+			break;
+		case 'diagnostics_request':
+			handleDiagnosticsRequest(message.filePath);
+			break;
+	}
+}
+
+function handleFileChange(message: FileChangeMessage): void {
+	const config = vscode.workspace.getConfiguration('pdm');
+	const showDiffPreview = config.get<boolean>('showDiffPreview', true);
+
+	// Add to pending changes
+	diffManager.addPendingChange(message);
+
+	if (showDiffPreview) {
+		// Show diff immediately
+		diffManager.showDiff(message.id);
+	}
+}
+
+function handleCloseDiff(message: CloseDiffMessage): void {
+	// Close the diff preview when tool is confirmed/rejected in CLI
+	diffManager.closeDiff(message.id);
+}
+
+function handleOpenFile(message: OpenFileMessage): void {
+	// Open the file in VS Code editor for viewing
+	const uri = vscode.Uri.file(message.filePath);
+	vscode.window.showTextDocument(uri, {
+		preview: true,
+		preserveFocus: false,
+		selection: new vscode.Range(0, 0, 0, 0), // Position cursor at start of file
+	});
+	outputChannel.appendLine(`Opened file: ${message.filePath}`);
+}
+
+function handleDiagnosticsRequest(filePath?: string): void {
+	const diagnostics: DiagnosticInfo[] = [];
+
+	if (filePath) {
+		// Get diagnostics for specific file
+		const uri = vscode.Uri.file(filePath);
+		const fileDiagnostics = vscode.languages.getDiagnostics(uri);
+		diagnostics.push(...convertDiagnostics(uri, fileDiagnostics));
+	} else {
+		// Get all diagnostics
+		const allDiagnostics = vscode.languages.getDiagnostics();
+		for (const [uri, fileDiagnostics] of allDiagnostics) {
+			diagnostics.push(...convertDiagnostics(uri, fileDiagnostics));
+		}
+	}
+
+	wsClient.send({
+		type: 'diagnostics_response',
+		diagnostics,
+	});
+}
+
+function convertDiagnostics(
+	uri: vscode.Uri,
+	diagnostics: readonly vscode.Diagnostic[]): DiagnosticInfo[] {
+	return diagnostics.map(d => ({
+		filePath: uri.fsPath,
+		line: d.range.start.line + 1, // 1-indexed
+		character: d.range.start.character + 1,
+		message: d.message,
+		severity: severityToString(d.severity),
+		source: d.source,
+	}));
+}
+
+function severityToString(
+	severity: vscode.DiagnosticSeverity): DiagnosticInfo['severity'] {
+	switch (severity) {
+		case vscode.DiagnosticSeverity.Error:
+			return 'error';
+		case vscode.DiagnosticSeverity.Warning:
+			return 'warning';
+		case vscode.DiagnosticSeverity.Information:
+			return 'info';
+		case vscode.DiagnosticSeverity.Hint:
+			return 'hint';
+	}
+}
+
+function startCli(): void {
+	const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+	const cwd = workspaceFolder?.uri.fsPath || process.cwd();
+
+	// Create terminal and run pdm
+	const terminal = vscode.window.createTerminal({
+		name: 'PDM Code',
+		cwd,
+	});
+
+	terminal.sendText('pdm --vscode');
+	terminal.show();
+
+	// Try to connect after a delay
+	setTimeout(() => connect(), 3000);
+}
+
+// Send workspace context to CLI
+function sendWorkspaceContext(): void {
+	const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+	const activeEditor = vscode.window.activeTextEditor;
+
+	// Get open files
+	const openFiles = vscode.workspace.textDocuments
+		.filter(doc => doc.uri.scheme === 'file')
+		.map(doc => doc.uri.fsPath);
+
+	// Get diagnostics for open files
+	const diagnostics: DiagnosticInfo[] = [];
+	for (const filePath of openFiles) {
+		const uri = vscode.Uri.file(filePath);
+		const fileDiagnostics = vscode.languages.getDiagnostics(uri);
+		diagnostics.push(...convertDiagnostics(uri, fileDiagnostics));
+	}
+
+	wsClient.send({
+		type: 'context',
+		workspaceFolder: workspaceFolder?.uri.fsPath,
+		openFiles,
+		activeFile: activeEditor?.document.uri.fsPath,
+		diagnostics,
+	});
+}
+
+// Debounce rapid selection changes before pushing active editor state
+function scheduleActiveEditorSend(): void {
+	if (activeEditorDebounce) {
+		clearTimeout(activeEditorDebounce);
+	}
+	activeEditorDebounce = setTimeout(() => {
+		activeEditorDebounce = null;
+		sendActiveEditor();
+	}, ACTIVE_EDITOR_DEBOUNCE_MS);
+}
+
+// Push the current active editor + selection to the CLI. When no editor is
+// active or the document isn't a file on disk, clear the CLI-side state.
+function sendActiveEditor(): void {
+	const editor = vscode.window.activeTextEditor;
+	
+	// 1. Notify the local ACP GUI backend
+	if (acpClient) {
+		acpClient.notifyActiveEditorChanged(editor);
+	}
+
+	// 2. Notify the legacy CLI WebSocket backend
+	// The WebSocket Companion handles editor synchronization for the interactive CLI 'pdm'
+	if (!wsClient.isConnected()) {
+		return;
+	}
+
+	const doc = editor?.document;
+	const isFile = doc?.uri.scheme === 'file';
+
+	const payload = (() => {
+		if (!editor || !doc || !isFile) {
+			return {type: 'active_editor' as const};
+		}
+
+		const selection = editor.selection;
+		const hasSelection = !selection.isEmpty;
+		return {
+			type: 'active_editor' as const,
+			filePath: doc.uri.fsPath,
+			fileName: path.basename(doc.uri.fsPath),
+			selection: hasSelection ? doc.getText(selection) : undefined,
+			startLine: hasSelection ? selection.start.line + 1 : undefined,
+			endLine: hasSelection ? selection.end.line + 1 : undefined,
+		};
+	})();
+
+	const serialized = JSON.stringify(payload);
+	if (serialized === lastActiveEditorPayload) {
+		return;
+	}
+	lastActiveEditorPayload = serialized;
+
+	wsClient.send(payload);
+}

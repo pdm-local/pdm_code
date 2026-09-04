@@ -1,0 +1,942 @@
+import test from 'ava';
+import {mkdtempSync, rmSync} from 'fs';
+import {tmpdir} from 'os';
+import {join} from 'path';
+import React from 'react';
+import {render} from 'ink-testing-library';
+import {
+	resetPreferencesCache,
+	updateProfessionalTone,
+	updateVisionModel,
+} from '@/config/preferences';
+import {setToolRegistryGetter} from '@/message-handler';
+import {getLastBuiltPrompt} from '@/utils/prompt-builder';
+import {
+	__setClientFactoryForTesting,
+	resetVisionDelegateClients,
+} from '@/vision/vision-delegate';
+import {getBaseSystemPrompt, useChatHandler} from './useChatHandler';
+import type {UseChatHandlerProps, ChatHandlerReturn} from './types';
+import type {LLMClient, Message} from '../../types/core';
+import {useUserMessageQueue} from '../useUserMessageQueue';
+
+// Test component that uses the hook and exposes results
+function TestHookComponent(props: UseChatHandlerProps & {onResult?: (result: ChatHandlerReturn) => void}) {
+	const {onResult, ...hookProps} = props;
+	const result = useChatHandler(hookProps);
+
+	React.useEffect(() => {
+		onResult?.(result);
+	}, [result, onResult]);
+
+	return <></>;
+}
+
+// Helper to create mock props
+const createMockProps = (overrides?: Partial<UseChatHandlerProps>): UseChatHandlerProps => ({
+	client: null,
+	toolManager: null,
+	messages: [],
+	setMessages: () => {},
+	currentProvider: 'test-provider',
+	currentModel: 'test-model',
+	setIsCancelling: () => {},
+	addToChatQueue: () => {},
+	abortController: null,
+	setAbortController: () => {},
+	...overrides,
+});
+
+const createMockClient = (): LLMClient => ({
+	getCurrentModel: () => 'test-model',
+	setModel: () => {},
+	getContextSize: () => 0,
+	getAvailableModels: async () => [],
+	// Required by LLMClient, and genuinely called on the image path (the
+	// vision capability probe needs the provider's base URL). This mock
+	// omitted it, and neither tsc nor Biome look at spec files, so the gap
+	// only surfaced at runtime.
+	getProviderConfig: () =>
+		({
+			name: 'test-provider',
+			type: 'openai-compatible',
+			models: ['test-model'],
+		}) as unknown as ReturnType<LLMClient['getProviderConfig']>,
+	chat: async (_messages, _tools, callbacks) => {
+		callbacks.onFinish?.();
+		return {
+			choices: [
+				{
+					message: {
+						role: 'assistant',
+						content: 'ok',
+					},
+				},
+			],
+		};
+	},
+	clearContext: async () => {},
+	getTimeout: () => undefined,
+});
+
+const createMockToolManager = () => ({
+	getAvailableToolNames: () => ['read_file'],
+	getToolNames: () => ['read_file'],
+	getFilteredTools: () => ({}),
+	getFilteredToolsForProvider: () => ({}),
+}) as NonNullable<UseChatHandlerProps['toolManager']>;
+
+const waitForCondition = async (
+	condition: () => boolean,
+	timeoutMs = 1000,
+) => {
+	const startedAt = Date.now();
+
+	while (Date.now() - startedAt < timeoutMs) {
+		if (condition()) {
+			return;
+		}
+
+		await new Promise(resolve => setTimeout(resolve, 25));
+	}
+
+	throw new Error(`Timed out after ${timeoutMs}ms waiting for condition`);
+};
+
+test('useChatHandler - returns correct interface', t => {
+	let hookResult: ChatHandlerReturn | null = null;
+
+	const props = createMockProps();
+
+	render(
+		<TestHookComponent
+			{...props}
+			onResult={result => {
+				hookResult = result;
+			}}
+		/>,
+	);
+
+	// Verify the hook returned the expected interface
+	t.truthy(hookResult);
+	t.true('handleChatMessage' in hookResult!);
+	t.true('processAssistantResponse' in hookResult!);
+	t.true('isGenerating' in hookResult!);
+	t.true('streamingContent' in hookResult!);
+	t.true('streamingReasoning' in hookResult!);
+	t.true('tokenCount' in hookResult!);
+});
+
+test('useChatHandler - returns correct function types', t => {
+	let hookResult: ChatHandlerReturn | null = null;
+
+	const props = createMockProps();
+
+	render(
+		<TestHookComponent
+			{...props}
+			onResult={result => {
+				hookResult = result;
+			}}
+		/>,
+	);
+
+	t.truthy(hookResult);
+	t.is(typeof hookResult!.handleChatMessage, 'function');
+	t.is(typeof hookResult!.processAssistantResponse, 'function');
+	t.is(typeof hookResult!.isGenerating, 'boolean');
+	t.is(typeof hookResult!.streamingContent, 'string');
+	t.is(typeof hookResult!.streamingReasoning, 'string');
+	t.is(typeof hookResult!.tokenCount, 'number');
+});
+
+test('useChatHandler - initial streaming state is correct', t => {
+	let hookResult: ChatHandlerReturn | null = null;
+
+	const props = createMockProps();
+
+	render(
+		<TestHookComponent
+			{...props}
+			onResult={result => {
+				hookResult = result;
+			}}
+		/>,
+	);
+
+	t.truthy(hookResult);
+	t.is(hookResult!.isGenerating, false);
+	t.is(hookResult!.streamingContent, '');
+	t.is(hookResult!.streamingReasoning, '');
+	t.is(hookResult!.tokenCount, 0);
+});
+
+test('useChatHandler - handles empty messages array', t => {
+	let hookResult: ChatHandlerReturn | null = null;
+
+	const props = createMockProps({
+		messages: [],
+	});
+
+	t.notThrows(() => {
+		render(
+			<TestHookComponent
+				{...props}
+				onResult={result => {
+					hookResult = result;
+				}}
+			/>,
+		);
+	});
+
+	t.truthy(hookResult);
+});
+
+test('useChatHandler - handles messages with content', t => {
+	let hookResult: ChatHandlerReturn | null = null;
+
+	const messages: Message[] = [
+		{role: 'user', content: 'test message'},
+		{role: 'assistant', content: 'test response'},
+	];
+
+	const props = createMockProps({
+		messages,
+	});
+
+	t.notThrows(() => {
+		render(
+			<TestHookComponent
+				{...props}
+				onResult={result => {
+					hookResult = result;
+				}}
+			/>,
+		);
+	});
+
+	t.truthy(hookResult);
+});
+
+test('useChatHandler - handles different development modes', t => {
+	const modes: Array<'normal' | 'auto-accept' | 'yolo' | 'plan'> = ['normal', 'auto-accept', 'yolo', 'plan'];
+
+	for (const mode of modes) {
+		let hookResult: ChatHandlerReturn | null = null;
+
+		const props = createMockProps({
+			developmentMode: mode,
+		});
+
+		t.notThrows(() => {
+			render(
+				<TestHookComponent
+					{...props}
+					onResult={result => {
+						hookResult = result;
+					}}
+				/>,
+			);
+		}, `Should handle ${mode} mode`);
+
+		t.truthy(hookResult);
+	}
+});
+
+test('useChatHandler - handles non-interactive mode', t => {
+	let hookResult: ChatHandlerReturn | null = null;
+
+	const props = createMockProps({
+		nonInteractiveMode: true,
+	});
+
+	t.notThrows(() => {
+		render(
+			<TestHookComponent
+				{...props}
+				onResult={result => {
+					hookResult = result;
+				}}
+			/>,
+		);
+	});
+
+	t.truthy(hookResult);
+});
+
+test('useChatHandler - accepts abort controller', t => {
+	let hookResult: ChatHandlerReturn | null = null;
+
+	const controller = new AbortController();
+	const props = createMockProps({
+		abortController: controller,
+	});
+
+	t.notThrows(() => {
+		render(
+			<TestHookComponent
+				{...props}
+				onResult={result => {
+					hookResult = result;
+				}}
+			/>,
+		);
+	});
+
+	t.truthy(hookResult);
+});
+
+test('useChatHandler - handles null client gracefully', t => {
+	let hookResult: ChatHandlerReturn | null = null;
+
+	const props = createMockProps({
+		client: null,
+		toolManager: null,
+	});
+
+	t.notThrows(() => {
+		render(
+			<TestHookComponent
+				{...props}
+				onResult={result => {
+					hookResult = result;
+				}}
+			/>,
+		);
+	});
+
+	t.truthy(hookResult);
+});
+
+test('useChatHandler - setMessages callback works', t => {
+	let hookResult: ChatHandlerReturn | null = null;
+
+	const messages: Message[] = [];
+	const setMessages = (newMessages: Message[]) => {
+		messages.length = 0;
+		messages.push(...newMessages);
+	};
+
+	const props = createMockProps({
+		messages,
+		setMessages,
+	});
+
+	render(
+		<TestHookComponent
+			{...props}
+			onResult={result => {
+				hookResult = result;
+			}}
+		/>,
+	);
+
+	t.truthy(hookResult);
+
+	// Test that setMessages works
+	const newMessages: Message[] = [{role: 'user', content: 'test'}];
+	props.setMessages(newMessages);
+
+	t.is(messages.length, 1);
+	t.is(messages[0].content, 'test');
+});
+
+test('useChatHandler - callbacks are provided', t => {
+	let hookResult: ChatHandlerReturn | null = null;
+
+	const props = createMockProps({
+		onConversationComplete: () => {},
+	});
+
+	render(
+		<TestHookComponent
+			{...props}
+			onResult={result => {
+				hookResult = result;
+			}}
+		/>,
+	);
+
+	t.truthy(hookResult);
+	// The hook should successfully initialize with callbacks
+	t.is(typeof props.onConversationComplete, 'function');
+});
+
+test('useChatHandler - drains queued message when setup fails before conversation loop', async t => {
+	type QueueDrainHarnessResult = {
+		chatHandler: ChatHandlerReturn;
+		messageQueue: ReturnType<typeof useUserMessageQueue>;
+		drainedMessages: string[];
+	};
+
+	let hookResult: QueueDrainHarnessResult | null = null;
+	const throwingToolManager = {
+		...createMockToolManager(),
+		getToolNames: () => {
+			throw new Error('command prompt failed');
+		},
+	} as NonNullable<UseChatHandlerProps['toolManager']>;
+	const customCommandLoader = {
+		findRelevantCommands: () => [],
+	} as unknown as NonNullable<UseChatHandlerProps['customCommandLoader']>;
+
+	function QueueDrainHarness({
+		onResult,
+	}: {
+		onResult: (result: QueueDrainHarnessResult) => void;
+	}) {
+		const messageQueue = useUserMessageQueue();
+		const drainedMessagesRef = React.useRef<string[]>([]);
+		const chatHandler = useChatHandler(
+			createMockProps({
+				client: createMockClient(),
+				toolManager: throwingToolManager,
+				customCommandLoader,
+				onConversationComplete: () => {
+					void messageQueue.drainNextMessage(message => {
+						drainedMessagesRef.current.push(message.message);
+						return true;
+					});
+				},
+			}),
+		);
+
+		React.useEffect(() => {
+			onResult({
+				chatHandler,
+				messageQueue,
+				drainedMessages: drainedMessagesRef.current,
+			});
+		}, [chatHandler, messageQueue, onResult]);
+
+		return <></>;
+	}
+
+	const rendered = render(
+		<QueueDrainHarness
+			onResult={result => {
+				hookResult = result;
+			}}
+		/>,
+	);
+
+	await waitForCondition(() => hookResult !== null);
+
+	hookResult!.messageQueue.enqueueMessage({
+		message: 'queued after failure',
+		displayValue: 'Queued after failure',
+	});
+
+	await waitForCondition(() => hookResult!.messageQueue.queuedMessages.length === 1);
+
+	await hookResult!.chatHandler.handleChatMessage('current turn');
+
+	await waitForCondition(
+		() => hookResult!.drainedMessages[0] === 'queued after failure',
+	);
+	await waitForCondition(() => hookResult!.messageQueue.queuedMessages.length === 0);
+
+	t.deepEqual(hookResult!.drainedMessages, ['queued after failure']);
+	t.is(hookResult!.messageQueue.queuedMessages.length, 0);
+	rendered.unmount();
+});
+
+test('useChatHandler - does not offer review when plan mode wrote no artifact', async t => {
+	let planComplete = 0;
+	let hookResult: ChatHandlerReturn | null = null;
+	const customCommandLoader = {
+		findRelevantCommands: () => [],
+	} as unknown as NonNullable<UseChatHandlerProps['customCommandLoader']>;
+
+	render(
+		<TestHookComponent
+			{...createMockProps({
+				client: createMockClient(),
+				toolManager: createMockToolManager(),
+				customCommandLoader,
+				developmentMode: 'plan',
+				onPlanTurnComplete: () => {
+					planComplete++;
+				},
+			})}
+			onResult={result => {
+				hookResult = result;
+			}}
+		/>,
+	);
+
+	await waitForCondition(() => hookResult !== null);
+	await hookResult!.handleChatMessage('make a plan');
+	t.is(planComplete, 0);
+});
+
+test('useChatHandler - offers review after write_plan succeeds', async t => {
+	let planComplete = 0;
+	let hookResult: ChatHandlerReturn | null = null;
+	let callCount = 0;
+	const client: LLMClient = {
+		...createMockClient(),
+		chat: async (_messages, _tools, callbacks) => {
+			callbacks.onFinish?.();
+			callCount++;
+			return {
+				choices: [
+					{
+						message:
+							callCount === 1
+								? {
+									role: 'assistant' as const,
+									content: '',
+									tool_calls: [
+										{
+											id: 'write-plan',
+											function: {
+												name: 'write_plan',
+												arguments: {content: '# Plan'},
+											},
+										},
+									],
+								}
+								: {role: 'assistant' as const, content: 'Plan ready'},
+					},
+				],
+			};
+		},
+	};
+	const toolManager = {
+		...createMockToolManager(),
+		getAvailableToolNames: () => ['write_plan'],
+		getToolNames: () => ['write_plan'],
+		hasTool: (name: string) => name === 'write_plan',
+		getToolEntry: () => ({
+			name: 'write_plan',
+			approval: false,
+			readOnly: false,
+		}),
+		isReadOnly: () => false,
+		getToolFormatter: () => undefined,
+	} as unknown as NonNullable<UseChatHandlerProps['toolManager']>;
+	const customCommandLoader = {
+		findRelevantCommands: () => [],
+	} as unknown as NonNullable<UseChatHandlerProps['customCommandLoader']>;
+	setToolRegistryGetter(() => ({write_plan: async () => 'Plan saved'}));
+
+	try {
+		render(
+			<TestHookComponent
+				{...createMockProps({
+					client,
+					toolManager,
+					customCommandLoader,
+					developmentMode: 'plan',
+					ensureCurrentSessionId: () =>
+						'11111111-1111-4111-8111-111111111111',
+					onPlanTurnComplete: () => {
+						planComplete++;
+					},
+				})}
+				onResult={result => {
+					hookResult = result;
+				}}
+			/>,
+		);
+
+		await waitForCondition(() => hookResult !== null);
+		await hookResult!.handleChatMessage('make a plan');
+		t.is(planComplete, 1);
+	} finally {
+		setToolRegistryGetter(() => ({}));
+	}
+});
+
+test('useChatHandler - persists a prose plan when write_plan was omitted', async t => {
+	let planComplete = 0;
+	let persistedContent = '';
+	let persistedSessionId: string | undefined;
+	let hookResult: ChatHandlerReturn | null = null;
+	const client: LLMClient = {
+		...createMockClient(),
+		chat: async (_messages, _tools, callbacks) => {
+			callbacks.onFinish?.();
+			return {
+				choices: [
+					{
+						message: {
+							role: 'assistant' as const,
+							content: '# Plan\n\n1. Build it.',
+						},
+					},
+				],
+			};
+		},
+	};
+	const toolManager = {
+		...createMockToolManager(),
+		getAvailableToolNames: () => ['write_plan'],
+		getToolNames: () => ['write_plan'],
+		hasTool: (name: string) => name === 'write_plan',
+		getToolEntry: () => ({
+			name: 'write_plan',
+			approval: false,
+			readOnly: false,
+		}),
+		isReadOnly: () => false,
+		getToolFormatter: () => undefined,
+	} as unknown as NonNullable<UseChatHandlerProps['toolManager']>;
+	const customCommandLoader = {
+		findRelevantCommands: () => [],
+	} as unknown as NonNullable<UseChatHandlerProps['customCommandLoader']>;
+	setToolRegistryGetter(() => ({
+		write_plan: async (args, options) => {
+			persistedContent = args.content;
+			persistedSessionId = options?.sessionId;
+			return 'Plan saved';
+		},
+	}));
+
+	try {
+		render(
+			<TestHookComponent
+				{...createMockProps({
+					client,
+					toolManager,
+					customCommandLoader,
+					developmentMode: 'plan',
+					ensureCurrentSessionId: () =>
+						'11111111-1111-4111-8111-111111111111',
+					onPlanTurnComplete: () => {
+						planComplete++;
+					},
+				})}
+				onResult={result => {
+					hookResult = result;
+				}}
+			/>,
+		);
+
+		await waitForCondition(() => hookResult !== null);
+		await hookResult!.handleChatMessage('make a plan');
+		t.is(persistedContent, '# Plan\n\n1. Build it.');
+		t.is(persistedSessionId, '11111111-1111-4111-8111-111111111111');
+		t.is(planComplete, 1);
+	} finally {
+		setToolRegistryGetter(() => ({}));
+	}
+});
+
+test('useChatHandler - allocates a session before starting a turn', async t => {
+	let ensureCalls = 0;
+	let hookResult: ChatHandlerReturn | null = null;
+	const customCommandLoader = {
+		findRelevantCommands: () => [],
+	} as unknown as NonNullable<UseChatHandlerProps['customCommandLoader']>;
+
+	render(
+		<TestHookComponent
+			{...createMockProps({
+				client: createMockClient(),
+				toolManager: createMockToolManager(),
+				customCommandLoader,
+				ensureCurrentSessionId: () => {
+					ensureCalls++;
+					return '11111111-1111-4111-8111-111111111111';
+				},
+			})}
+			onResult={result => {
+				hookResult = result;
+			}}
+		/>,
+	);
+
+	await waitForCondition(() => hookResult !== null);
+	await hookResult!.handleChatMessage('start a session');
+	t.is(ensureCalls, 1);
+});
+
+// The signal must be scoped to plan mode, a normal-mode turn completing must
+// NOT surface the plan review bar (this is the fix for the mode-inference race).
+test('useChatHandler - does NOT fire onPlanTurnComplete for a normal-mode turn', async t => {
+	let planComplete = 0;
+	let hookResult: ChatHandlerReturn | null = null;
+	const customCommandLoader = {
+		findRelevantCommands: () => [],
+	} as unknown as NonNullable<UseChatHandlerProps['customCommandLoader']>;
+
+	render(
+		<TestHookComponent
+			{...createMockProps({
+				client: createMockClient(),
+				toolManager: createMockToolManager(),
+				customCommandLoader,
+				developmentMode: 'normal',
+				onPlanTurnComplete: () => {
+					planComplete++;
+				},
+			})}
+			onResult={result => {
+				hookResult = result;
+			}}
+		/>,
+	);
+
+	await waitForCondition(() => hookResult !== null);
+	await hookResult!.handleChatMessage('do a thing');
+	t.is(planComplete, 0);
+});
+
+test('useChatHandler - streaming state types are correct', t => {
+	let hookResult: ChatHandlerReturn | null = null;
+
+	const props = createMockProps();
+
+	render(
+		<TestHookComponent
+			{...props}
+			onResult={result => {
+				hookResult = result;
+			}}
+		/>,
+	);
+
+	t.truthy(hookResult);
+
+	// Validate streaming state structure
+	const streamingState = {
+		isGenerating: hookResult!.isGenerating,
+		streamingContent: hookResult!.streamingContent,
+		streamingReasoning: hookResult!.streamingReasoning,
+		tokenCount: hookResult!.tokenCount,
+	};
+
+	t.is(typeof streamingState.isGenerating, 'boolean');
+	t.is(typeof streamingState.streamingContent, 'string');
+	t.is(typeof streamingState.streamingReasoning, 'string');
+	t.is(typeof streamingState.tokenCount, 'number');
+});
+
+test('getBaseSystemPrompt - headless mode ignores cached prompt', t => {
+	// Headless is the daemon's mode for triggered runs - it must rebuild the
+	// system prompt each call so `Current Date:` reflects the trigger time
+	// rather than whatever the interactive TUI cached at boot.
+	const toolManager = {
+		getAvailableToolNames: (_tune: unknown, mode: string) => [`tool-for-${mode}`],
+	} as NonNullable<UseChatHandlerProps['toolManager']>;
+
+	const result = getBaseSystemPrompt(
+		'headless',
+		'cached-prompt',
+		toolManager,
+		undefined,
+		false,
+	);
+
+	t.not(result, 'cached-prompt');
+	t.true(result.includes('Current Date:'));
+});
+
+test('getBaseSystemPrompt - normal mode reuses cached prompt', t => {
+	const toolManager = {
+		getAvailableToolNames: (_tune: unknown, mode: string) => [`tool-for-${mode}`],
+	} as NonNullable<UseChatHandlerProps['toolManager']>;
+
+	const result = getBaseSystemPrompt(
+		'normal',
+		'cached-prompt',
+		toolManager,
+		undefined,
+		false,
+	);
+
+	t.is(result, 'cached-prompt');
+});
+
+test.serial(
+	'useChatHandler - toggling professional tone rebuilds the cached prompt',
+	async t => {
+		// The settings panel writes preferences straight to disk. Without the
+		// subscription the memoized base prompt would keep the old TONE state
+		// until the next mode or model switch.
+		const dir = mkdtempSync(join(tmpdir(), 'pdm-tone-hook-'));
+		const previousDir = process.env.PDM_CONFIG_DIR;
+		process.env.PDM_CONFIG_DIR = dir;
+		resetPreferencesCache();
+		updateProfessionalTone(false);
+
+		try {
+			render(
+				<TestHookComponent
+					{...createMockProps({toolManager: createMockToolManager()})}
+				/>,
+			);
+
+			t.false(getLastBuiltPrompt().includes('## TONE'));
+
+			updateProfessionalTone(true);
+			await waitForCondition(() => getLastBuiltPrompt().includes('## TONE'));
+
+			t.true(getLastBuiltPrompt().includes('## TONE'));
+		} finally {
+			if (previousDir === undefined) {
+				delete process.env.PDM_CONFIG_DIR;
+			} else {
+				process.env.PDM_CONFIG_DIR = previousDir;
+			}
+			resetPreferencesCache();
+			rmSync(dir, {recursive: true, force: true});
+		}
+	},
+);
+
+test.serial(
+	'useChatHandler - delegated image description never persists raw image bytes',
+	async t => {
+		// Regression guard: a delegated image must be replaced by its text
+		// description before addUserMessage runs. Persisting the base64 bytes
+		// alongside a model that can never see them anyway would sit in
+		// session history, get re-tokenized every turn, and get pulled into
+		// auto-compaction for no benefit - a 10MB image is ~13.3MB of base64.
+		const dir = mkdtempSync(join(tmpdir(), 'pdm-vision-hook-'));
+		const previousDir = process.env.PDM_CONFIG_DIR;
+		process.env.PDM_CONFIG_DIR = dir;
+		resetPreferencesCache();
+		updateVisionModel('delegate-provider', 'delegate-model');
+
+		const delegateClient: LLMClient = {
+			getCurrentModel: () => 'delegate-model',
+			setModel: () => {},
+			getContextSize: () => 0,
+			getAvailableModels: async () => [],
+			getProviderConfig: () =>
+				({
+					name: 'delegate-provider',
+					type: 'openai-compatible',
+					models: ['delegate-model'],
+				}) as unknown as ReturnType<LLMClient['getProviderConfig']>,
+			chat: async () => ({
+				choices: [
+					{
+						message: {
+							role: 'assistant' as const,
+							content: 'a stack trace showing a TypeError',
+						},
+					},
+				],
+			}),
+			clearContext: async () => {},
+			getTimeout: () => undefined,
+		};
+		__setClientFactoryForTesting(async (provider, _model) => ({
+			client: delegateClient,
+			actualProvider: provider ?? 'delegate-provider',
+		}));
+
+		let capturedMessages: Message[] = [];
+		let hookResult: ChatHandlerReturn | null = null;
+
+		try {
+			render(
+				<TestHookComponent
+					{...createMockProps({
+						client: createMockClient(),
+						toolManager: createMockToolManager(),
+						// gpt-3.5-turbo has confirmed text-only modality data on
+						// models.dev, so getModelVisionSupport resolves 'no'
+						// deterministically rather than 'unknown'.
+						currentModel: 'gpt-3.5-turbo',
+						setMessages: messages => {
+							capturedMessages = messages;
+						},
+					})}
+					onResult={result => {
+						hookResult = result;
+					}}
+				/>,
+			);
+
+			await waitForCondition(() => hookResult !== null);
+
+			await hookResult!.handleChatMessage(
+				'what does this error say?',
+				undefined,
+				[{data: 'ZmFrZQ==', mediaType: 'image/png'}],
+			);
+
+			await waitForCondition(() =>
+				capturedMessages.some(m => m.role === 'user'),
+			);
+
+			const userMessage = capturedMessages.find(m => m.role === 'user');
+			t.truthy(userMessage);
+			t.is(userMessage!.images, undefined);
+			t.true(
+				userMessage!.content.includes('a stack trace showing a TypeError'),
+			);
+			t.true(userMessage!.content.includes('what does this error say?'));
+		} finally {
+			__setClientFactoryForTesting(null);
+			resetVisionDelegateClients();
+			if (previousDir === undefined) {
+				delete process.env.PDM_CONFIG_DIR;
+			} else {
+				process.env.PDM_CONFIG_DIR = previousDir;
+			}
+			resetPreferencesCache();
+			rmSync(dir, {recursive: true, force: true});
+		}
+	},
+);
+
+test.serial(
+	'useChatHandler - an image with no vision delegate reports an error instead of silently dropping it',
+	async t => {
+		const dir = mkdtempSync(join(tmpdir(), 'pdm-vision-hook-'));
+		const previousDir = process.env.PDM_CONFIG_DIR;
+		process.env.PDM_CONFIG_DIR = dir;
+		resetPreferencesCache(); // no visionModel set
+
+		let hookResult: ChatHandlerReturn | null = null;
+		let sawErrorMessage = false;
+		let setMessagesCalled = false;
+
+		try {
+			render(
+				<TestHookComponent
+					{...createMockProps({
+						client: createMockClient(),
+						toolManager: createMockToolManager(),
+						currentModel: 'gpt-3.5-turbo',
+						addToChatQueue: () => {
+							sawErrorMessage = true;
+						},
+						setMessages: () => {
+							setMessagesCalled = true;
+						},
+					})}
+					onResult={result => {
+						hookResult = result;
+					}}
+				/>,
+			);
+
+			await waitForCondition(() => hookResult !== null);
+
+			await hookResult!.handleChatMessage('what does this show?', undefined, [
+				{data: 'ZmFrZQ==', mediaType: 'image/png'},
+			]);
+
+			t.true(sawErrorMessage, 'an error component was queued');
+			t.false(
+				setMessagesCalled,
+				'the turn never starts - nothing is added to history',
+			);
+		} finally {
+			if (previousDir === undefined) {
+				delete process.env.PDM_CONFIG_DIR;
+			} else {
+				process.env.PDM_CONFIG_DIR = previousDir;
+			}
+			resetPreferencesCache();
+			rmSync(dir, {recursive: true, force: true});
+		}
+	},
+);

@@ -1,0 +1,182 @@
+import {Box, Text} from 'ink';
+import React from 'react';
+
+import BashProgress from '@/components/bash-progress';
+import {isPdmCodeToolAlwaysAllowed} from '@/config/pdm-tools-config';
+import {TRUNCATION_OUTPUT_LIMIT} from '@/constants';
+import {useTerminalWidth} from '@/hooks/useTerminalWidth';
+import {useTheme} from '@/hooks/useTheme';
+import {type BashExecutionState, bashExecutor} from '@/services/bash-executor';
+import type {PdmCodeToolExport} from '@/types/core';
+import {jsonSchema, tool} from '@/types/core';
+import {truncateToolResult} from '@/utils/truncate-tool-result';
+
+/**
+ * Execute a bash command using the bash executor service.
+ * This is the internal implementation used by both the tool and direct !command mode.
+ *
+ * @param command - The bash command to execute
+ * @returns Object containing executionId and promise for the result
+ */
+export function executeBashCommand(
+	command: string,
+	options?: {timeoutMs?: number; signal?: AbortSignal},
+): {
+	executionId: string;
+	promise: Promise<BashExecutionState>;
+} {
+	return bashExecutor.execute(command, options);
+}
+
+/**
+ * Format bash execution result for LLM context
+ */
+export function formatBashResultForLLM(result: BashExecutionState): string {
+	let fullOutput = '';
+	const exitCodeInfo =
+		result.exitCode !== null ? `EXIT_CODE: ${result.exitCode}\n` : '';
+
+	if (result.stderr) {
+		fullOutput = `${exitCodeInfo}STDERR:\n${result.stderr}\nSTDOUT:\n${result.fullOutput}`;
+	} else {
+		fullOutput = `${exitCodeInfo}${result.fullOutput}`;
+	}
+
+	// Handle errors
+	if (result.error) {
+		fullOutput = `Error: ${result.error}\n${fullOutput}`;
+	}
+
+	// Limit the context for LLM to prevent overwhelming the model. Keeps both
+	// head and tail, since build/test tooling puts the actionable part (error
+	// list, failure summary, exit status) at the end.
+	return truncateToolResult(fullOutput, TRUNCATION_OUTPUT_LIMIT);
+}
+
+/**
+ * Tool execute function - called by the tool system
+ * Note: For streaming tools, the tool handler will use executeBashCommand directly
+ * and this function serves as a fallback/compatibility layer
+ */
+const executeExecuteBash = async (
+	args: {command: string},
+	options?: {abortSignal?: AbortSignal},
+): Promise<string> => {
+	const {promise} = bashExecutor.execute(args.command, {
+		signal: options?.abortSignal,
+	});
+	const result = await promise;
+	return formatBashResultForLLM(result);
+};
+
+const executeBashCoreTool = tool({
+	description:
+		'Execute a bash command in the working directory. Returns stdout, stderr, and exit code. Commands time out after 2 minutes by default. Use for: running builds, tests, installing packages, git operations not covered by git tools, or any shell command.',
+	inputSchema: jsonSchema<{command: string}>({
+		type: 'object',
+		properties: {
+			command: {
+				type: 'string',
+				description: 'The bash command to execute.',
+			},
+		},
+		required: ['command'],
+	}),
+	execute: async (args, options) => {
+		return await executeExecuteBash(args, options);
+	},
+});
+
+/**
+ * Formatter component - used for tool confirmation preview
+ */
+function ExecuteBashFormatterComponent({
+	command,
+}: {
+	command: string;
+}): React.ReactElement {
+	const boxWidth = useTerminalWidth();
+	const {colors} = useTheme();
+
+	return (
+		<Box flexDirection="column" marginBottom={1} width={boxWidth}>
+			<Text color={colors.tool}>⚒ execute_bash</Text>
+			<Box flexDirection="column">
+				<Text color={colors.secondary}>Command:</Text>
+				<Text wrap="wrap" color={colors.primary}>
+					{command}
+				</Text>
+			</Box>
+		</Box>
+	);
+}
+
+/**
+ * Regular formatter - called for tool confirmation preview
+ * Shows the command that will be executed
+ */
+const executeBashFormatter = (args: {command: string}): React.ReactElement => {
+	return <ExecuteBashFormatterComponent command={args.command} />;
+};
+
+/**
+ * Streaming formatter - called BEFORE execution to set up progress component
+ * The component subscribes to bash executor events and updates itself
+ */
+const executeBashStreamingFormatter = (
+	args: {command: string},
+	executionId: string,
+): React.ReactElement => {
+	return <BashProgress executionId={executionId} command={args.command} />;
+};
+
+const executeBashValidator = (args: {
+	command: string;
+}): Promise<{valid: true} | {valid: false; error: string}> => {
+	const command = args.command?.trim();
+
+	// Check if command is empty
+	if (!command) {
+		return Promise.resolve({
+			valid: false,
+			error: 'Command cannot be empty',
+		});
+	}
+
+	// Check for extremely dangerous commands
+	const dangerousPatterns = [
+		/rm\s+-rf\s+\/(?!\w)/i, // rm -rf / (but allow /path)
+		/mkfs/i, // Format filesystem
+		/dd\s+if=/i, // Direct disk write
+		/:(){:|:&};:/i, // Fork bomb
+		/>\s*\/dev\/sd[a-z]/i, // Writing to raw disk devices
+		/chmod\s+-R\s+000/i, // Remove all permissions recursively
+	];
+
+	for (const pattern of dangerousPatterns) {
+		if (pattern.test(command)) {
+			return Promise.resolve({
+				valid: false,
+				error: `Command contains potentially destructive operation: "${command}". This command is blocked for safety.`,
+			});
+		}
+	}
+
+	return Promise.resolve({valid: true});
+};
+
+export const executeBashTool: PdmCodeToolExport = {
+	name: 'execute_bash' as const,
+	tool: executeBashCoreTool,
+	formatter: executeBashFormatter,
+	streamingFormatter: executeBashStreamingFormatter,
+	validator: executeBashValidator,
+	// High risk: bash always requires approval unless explicitly always-allowed
+	// or in headless mode. Even auto-accept still prompts for bash. (Yolo is
+	// bypassed centrally by resolveToolApproval.)
+	approval: (_args, mode) => {
+		if (isPdmCodeToolAlwaysAllowed('execute_bash')) return false;
+		if (mode === 'headless') return false;
+		return true;
+	},
+};

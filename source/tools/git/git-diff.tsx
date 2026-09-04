@@ -1,0 +1,245 @@
+/**
+ * Git Diff Tool
+ *
+ * View changes between states (staged, unstaged, or against a commit/branch).
+ */
+
+import {Box, Text} from 'ink';
+import React from 'react';
+import {useTerminalWidth} from '@/hooks/useTerminalWidth';
+import {useTheme} from '@/hooks/useTheme';
+import type {PdmCodeToolExport} from '@/types/core';
+import {jsonSchema, tool} from '@/types/core';
+import {formatError} from '@/utils/error-formatter';
+import {execGit, truncateDiff} from './utils';
+
+// ============================================================================
+// Types
+// ============================================================================
+
+interface GitDiffInput {
+	staged?: boolean;
+	file?: string;
+	base?: string;
+	stat?: boolean;
+}
+
+const MAX_DIFF_LINES = 500;
+
+function buildGitDiffArgs(
+	args: GitDiffInput,
+	includeStat = Boolean(args.stat),
+): string[] {
+	const gitArgs: string[] = ['diff'];
+
+	if (args.staged) {
+		gitArgs.push('--cached');
+	}
+
+	if (includeStat) {
+		gitArgs.push('--stat-count=20', '--stat');
+	}
+
+	if (args.base) {
+		gitArgs.push(args.base);
+	}
+
+	if (args.file) {
+		gitArgs.push('--', args.file);
+	}
+
+	return gitArgs;
+}
+
+// ============================================================================
+// Execution
+// ============================================================================
+
+const executeGitDiff = async (args: GitDiffInput): Promise<string> => {
+	try {
+		const output = await execGit(buildGitDiffArgs(args));
+
+		if (!output.trim()) {
+			if (args.staged) {
+				return 'No staged changes.';
+			}
+			if (args.base) {
+				return `No differences with ${args.base}.`;
+			}
+			return 'No unstaged changes.';
+		}
+
+		// Summarize oversized full diffs to avoid sending large patches to the model.
+		if (!args.stat) {
+			const {content, truncated, totalLines} = truncateDiff(
+				output,
+				MAX_DIFF_LINES,
+			);
+			if (truncated) {
+				const filesChanged = output.match(/^diff --git /gm)?.length ?? 0;
+				if (filesChanged <= 1) {
+					return content;
+				}
+
+				try {
+					const statOutput = await execGit(buildGitDiffArgs(args, true));
+					return (
+						`${statOutput}\n\n` +
+						`Diff is too large to return in full (${totalLines} lines). ` +
+						'Use the file parameter to request a specific path for detailed output.'
+					);
+				} catch {
+					// Keep the result bounded even if the summary command fails.
+					return content;
+				}
+			}
+		}
+
+		return output;
+	} catch (error) {
+		return `Error: ${formatError(error)}`;
+	}
+};
+
+// ============================================================================
+// Tool Definition
+// ============================================================================
+
+const gitDiffCoreTool = tool({
+	description:
+		'View git diff of changes. Shows unstaged changes by default, use staged=true for staged changes, or base to compare against a branch/commit.',
+	inputSchema: jsonSchema<GitDiffInput>({
+		type: 'object',
+		properties: {
+			staged: {
+				type: 'boolean',
+				description: 'Show staged changes instead of unstaged (default: false)',
+			},
+			file: {
+				type: 'string',
+				description: 'Show diff for a specific file only',
+			},
+			base: {
+				type: 'string',
+				description:
+					'Compare against a branch or commit (e.g., "main", "HEAD~3")',
+			},
+			stat: {
+				type: 'boolean',
+				description: 'Show only diffstat summary instead of full diff',
+			},
+		},
+		required: [],
+	}),
+	execute: async (args, _options) => {
+		return await executeGitDiff(args);
+	},
+});
+
+// ============================================================================
+// Formatter
+// ============================================================================
+
+function GitDiffFormatter({
+	args,
+	result,
+}: {
+	args: GitDiffInput;
+	result?: string;
+}): React.ReactElement {
+	const boxWidth = useTerminalWidth();
+	const {colors} = useTheme();
+
+	// Parse result for stats
+	let filesChanged = 0;
+	let insertions = 0;
+	let deletions = 0;
+	let isEmpty = false;
+
+	if (result) {
+		isEmpty =
+			result.includes('No staged changes') ||
+			result.includes('No unstaged changes') ||
+			result.includes('No differences');
+
+		// Parse diffstat summary line
+		const statMatch = result.match(
+			/(\d+) files? changed(?:, (\d+) insertions?\(\+\))?(?:, (\d+) deletions?\(-\))?/,
+		);
+		if (statMatch) {
+			filesChanged = parseInt(statMatch[1], 10) || 0;
+			insertions = parseInt(statMatch[2], 10) || 0;
+			deletions = parseInt(statMatch[3], 10) || 0;
+		}
+	}
+
+	// Determine what we're comparing
+	let comparing = 'working tree vs HEAD';
+	if (args.staged) {
+		comparing = 'staged vs HEAD';
+	}
+	if (args.base) {
+		comparing = `working tree vs ${args.base}`;
+		if (args.staged) {
+			comparing = `staged vs ${args.base}`;
+		}
+	}
+
+	return (
+		<Box flexDirection="column" marginBottom={1} width={boxWidth}>
+			<Text color={colors.tool}>⚒ git_diff</Text>
+
+			<Box>
+				<Text color={colors.secondary}>Comparing: </Text>
+				<Text color={colors.text}>{comparing}</Text>
+			</Box>
+
+			{args.file && (
+				<Box>
+					<Text color={colors.secondary}>File: </Text>
+					<Text wrap="truncate-end" color={colors.primary}>
+						{args.file}
+					</Text>
+				</Box>
+			)}
+
+			{args.stat && (
+				<Box>
+					<Text color={colors.secondary}>Mode: </Text>
+					<Text color={colors.text}>stat only</Text>
+				</Box>
+			)}
+
+			{isEmpty && (
+				<Box marginTop={1}>
+					<Text color={colors.success}>✓ No changes</Text>
+				</Box>
+			)}
+
+			{!isEmpty && filesChanged > 0 && (
+				<Box>
+					<Text color={colors.secondary}>Stats: </Text>
+					<Text color={colors.text}>{filesChanged} files, </Text>
+					<Text color={colors.success}>+{insertions}</Text>
+					<Text color={colors.text}>, </Text>
+					<Text color={colors.error}>-{deletions}</Text>
+				</Box>
+			)}
+		</Box>
+	);
+}
+
+const formatter = (args: GitDiffInput, result?: string): React.ReactElement => {
+	return <GitDiffFormatter args={args} result={result} />;
+};
+
+// ============================================================================
+// Export
+// ============================================================================
+
+export const gitDiffTool: PdmCodeToolExport = {
+	name: 'git_diff' as const,
+	tool: gitDiffCoreTool,
+	formatter,
+	readOnly: true,
+};

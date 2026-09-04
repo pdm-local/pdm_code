@@ -1,0 +1,272 @@
+import {constants} from 'node:fs';
+import {access, writeFile} from 'node:fs/promises';
+import {resolve} from 'node:path';
+import React from 'react';
+import {getColors} from '@/config/index';
+import {getSafeSessionCwd} from '@/services/session-cwd';
+import type {PdmCodeToolExport} from '@/types/core';
+import {jsonSchema, tool} from '@/types/core';
+import {formatError} from '@/utils/error-formatter';
+import {getCachedFileContent, invalidateCache} from '@/utils/file-cache';
+import {validatePath} from '@/utils/path-validators';
+import {hasSeenFile, markFileSeen} from '@/utils/read-tracker';
+import {createFileToolApproval} from '@/utils/tool-approval';
+import {
+	closeDiffInVSCode,
+	isVSCodeConnected,
+	sendFileChangeToVSCode,
+} from '@/vscode/index';
+
+import {formatStringReplacePreview} from './string-replace-preview';
+
+interface StringReplaceArgs {
+	path: string;
+	old_str: string;
+	new_str: string;
+}
+
+const STRING_REPLACE_CONTEXT_LINES = 20;
+
+function formatUpdatedFileContext(
+	content: string,
+	startLine: number,
+	endLine: number,
+): string {
+	const lines = content.split('\n');
+	const contextStartLine = Math.max(
+		1,
+		startLine - STRING_REPLACE_CONTEXT_LINES,
+	);
+	const contextEndLine = Math.min(
+		lines.length,
+		endLine + STRING_REPLACE_CONTEXT_LINES,
+	);
+
+	let fileContext = `\n\nUpdated file context (lines ${contextStartLine}-${contextEndLine} of ${lines.length}):\n`;
+	if (contextStartLine > 1) {
+		fileContext += `[... lines 1-${contextStartLine - 1} omitted ...]\n`;
+	}
+
+	for (let i = contextStartLine - 1; i < contextEndLine; i++) {
+		const lineNumStr = String(i + 1).padStart(4, ' ');
+		fileContext += `${lineNumStr}: ${lines[i] || ''}\n`;
+	}
+
+	if (contextEndLine < lines.length) {
+		fileContext += `[... lines ${contextEndLine + 1}-${lines.length} omitted ...]\n`;
+	}
+
+	return fileContext;
+}
+
+const executeStringReplace = async (
+	args: StringReplaceArgs,
+): Promise<string> => {
+	const {path, old_str, new_str} = args;
+
+	if (!old_str || old_str.length === 0) {
+		throw new Error(
+			'old_str cannot be empty. Provide the exact content to find and replace.',
+		);
+	}
+
+	const absPath = resolve(getSafeSessionCwd(), path);
+	const cached = await getCachedFileContent(absPath);
+	const fileContent = cached.content;
+
+	const occurrences = fileContent.split(old_str).length - 1;
+
+	if (occurrences === 0) {
+		throw new Error(
+			`Content not found in file. The file may have changed since you last read it.\n`,
+		);
+	}
+
+	if (occurrences > 1) {
+		throw new Error(
+			`Found ${occurrences} matches for the search string. Please provide more surrounding context to make the match unique\n`,
+		);
+	}
+
+	const newContent = fileContent.replace(old_str, new_str);
+	await writeFile(absPath, newContent, 'utf-8');
+	invalidateCache(absPath);
+	// The model now knows the file's current contents, so a follow-up edit is
+	// not blind.
+	markFileSeen(absPath);
+
+	const oldStrLines = old_str.split('\n');
+	const newStrLines = new_str.split('\n');
+
+	const matchIndex = fileContent.indexOf(old_str);
+	const startLine = fileContent.slice(0, matchIndex).split('\n').length;
+
+	const endLine = startLine + oldStrLines.length - 1;
+	const newEndLine = startLine + newStrLines.length - 1;
+
+	const rangeDesc =
+		startLine === endLine
+			? `line ${startLine}`
+			: `lines ${startLine}-${endLine}`;
+	const newRangeDesc =
+		startLine === newEndLine
+			? `line ${startLine}`
+			: `lines ${startLine}-${newEndLine}`;
+
+	return `Successfully replaced content at ${rangeDesc} (now ${newRangeDesc}).${formatUpdatedFileContext(newContent, startLine, newEndLine)}`;
+};
+
+const stringReplaceCoreTool = tool({
+	description:
+		'Replace exact string content in a file. IMPORTANT: Provide exact content including whitespace and surrounding context. For unique matching, include 2-3 lines before/after the change. Break large changes into multiple small replacements. Successful edits return a bounded context window around the changed range, not the entire file.',
+	inputSchema: jsonSchema<StringReplaceArgs>({
+		type: 'object',
+		properties: {
+			path: {
+				type: 'string',
+				description: 'The path to the file to edit.',
+			},
+			old_str: {
+				type: 'string',
+				description:
+					'The EXACT string to find and replace, including all whitespace, newlines, and indentation. Must match exactly. Include surrounding context (2-3 lines) to ensure unique match.',
+			},
+			new_str: {
+				type: 'string',
+				description:
+					'The replacement string. Can be empty to delete content. Must preserve proper indentation and formatting.',
+			},
+		},
+		required: ['path', 'old_str', 'new_str'],
+	}),
+	execute: async (args, _options) => {
+		return await executeStringReplace(args);
+	},
+});
+
+// Track VS Code change IDs for cleanup
+const vscodeChangeIds = new Map<string, string>();
+
+const stringReplaceFormatter = async (
+	args: StringReplaceArgs,
+	result?: string,
+): Promise<React.ReactElement> => {
+	const colors = getColors();
+	const {path, old_str, new_str} = args;
+	const absPath = resolve(getSafeSessionCwd(), path);
+
+	if (result === undefined && isVSCodeConnected()) {
+		try {
+			const cached = await getCachedFileContent(absPath);
+			const fileContent = cached.content;
+
+			const occurrences = fileContent.split(old_str).length - 1;
+			if (occurrences === 1) {
+				const newContent = fileContent.replace(old_str, new_str);
+
+				const changeId = sendFileChangeToVSCode(
+					absPath,
+					fileContent,
+					newContent,
+					'string_replace',
+					{path, old_str, new_str},
+				);
+				if (changeId) {
+					vscodeChangeIds.set(absPath, changeId);
+				}
+			}
+		} catch {
+			// Silently ignore errors sending to VS Code
+		}
+	} else if (result !== undefined && isVSCodeConnected()) {
+		const changeId = vscodeChangeIds.get(absPath);
+		if (changeId) {
+			closeDiffInVSCode(changeId);
+			vscodeChangeIds.delete(absPath);
+		}
+	}
+
+	return formatStringReplacePreview(args, result, colors);
+};
+
+const stringReplaceValidator = async (
+	args: StringReplaceArgs,
+): Promise<{valid: true} | {valid: false; error: string}> => {
+	const {path, old_str} = args;
+
+	const pathResult = validatePath(path);
+	if (!pathResult.valid) return pathResult;
+
+	const absPath = resolve(getSafeSessionCwd(), path);
+	try {
+		await access(absPath, constants.F_OK);
+	} catch (error) {
+		if (error && typeof error === 'object' && 'code' in error) {
+			if (error.code === 'ENOENT') {
+				return {
+					valid: false,
+					error: `File "${path}" does not exist`,
+				};
+			}
+		}
+		const errorMessage = formatError(error);
+		return {
+			valid: false,
+			error: `Cannot access file "${path}": ${errorMessage}`,
+		};
+	}
+
+	if (!old_str || old_str.length === 0) {
+		return {
+			valid: false,
+			error:
+				'old_str cannot be empty. Provide the exact content to find and replace.',
+		};
+	}
+
+	// Read-before-edit: refuse to edit a file the model has not actually seen
+	// this session. Editing blind is the dominant source of mismatched old_str
+	// on small models; forcing a Read first makes old_str match exactly.
+	if (!hasSeenFile(absPath)) {
+		return {
+			valid: false,
+			error: `You must read "${path}" before editing it. Call read_file on it first, if the file is over 300 lines, specify start_line and end_line to read its actual content, not just metadata, then retry string_replace with old_str copied exactly from the file.`,
+		};
+	}
+
+	try {
+		const cached = await getCachedFileContent(absPath);
+		const fileContent = cached.content;
+		const occurrences = fileContent.split(old_str).length - 1;
+
+		if (occurrences === 0) {
+			return {
+				valid: false,
+				error: `Content not found in file. The file may have changed since you last read it. Suggestion: Read the file again to see current contents.`,
+			};
+		}
+
+		if (occurrences > 1) {
+			return {
+				valid: false,
+				error: `Found ${occurrences} matches for the search string. Please provide more surrounding context to make the match unique.`,
+			};
+		}
+	} catch (error) {
+		const errorMessage = formatError(error);
+		return {
+			valid: false,
+			error: `Error reading file "${path}": ${errorMessage}`,
+		};
+	}
+
+	return {valid: true};
+};
+
+export const stringReplaceTool: PdmCodeToolExport = {
+	name: 'string_replace' as const,
+	tool: stringReplaceCoreTool,
+	formatter: stringReplaceFormatter,
+	validator: stringReplaceValidator,
+	approval: createFileToolApproval('string_replace'),
+};

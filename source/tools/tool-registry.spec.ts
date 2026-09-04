@@ -1,0 +1,487 @@
+import test from 'ava';
+import { ToolRegistry } from './tool-registry';
+import type { ToolEntry } from '@/types/index';
+
+// Mock tool handler function - returns Promise<string>
+const mockHandler: ToolEntry['handler'] = async () => 'test result';
+
+// Mock formatter function
+const mockFormatter: ToolEntry['formatter'] = (output: unknown) => {
+	return String(output);
+};
+
+// Mock validator function - returns Promise<{valid: true} | {valid: false, error: string}>
+const mockValidator: ToolEntry['validator'] = async () => ({ valid: true });
+
+// Mock AI SDK tool - cast to any since we're just testing registry functionality
+const mockTool: ToolEntry['tool'] = {
+	execute: async () => 'test result',
+} as any;
+
+function createMockToolEntry(overrides: Partial<ToolEntry> = {}): ToolEntry {
+	return {
+		name: 'test-tool',
+		handler: mockHandler,
+		tool: mockTool,
+		formatter: mockFormatter,
+		validator: mockValidator,
+		...overrides
+	} as ToolEntry;
+}
+
+test('ToolRegistry - register adds a tool entry', t => {
+	const registry = new ToolRegistry();
+	const entry = createMockToolEntry();
+
+	registry.register(entry);
+
+	t.true(registry.hasTool('test-tool'));
+	t.is(registry.getToolCount(), 1);
+});
+
+test('ToolRegistry - registerMany adds multiple tools', t => {
+	const registry = new ToolRegistry();
+	const entries = [
+		createMockToolEntry({ name: 'tool1' }),
+		createMockToolEntry({ name: 'tool2' }),
+		createMockToolEntry({ name: 'tool3' })
+	];
+
+	registry.registerMany(entries);
+
+	t.is(registry.getToolCount(), 3);
+	t.true(registry.hasTool('tool1'));
+	t.true(registry.hasTool('tool2'));
+	t.true(registry.hasTool('tool3'));
+});
+
+test('ToolRegistry - registerMany with empty array', t => {
+	const registry = new ToolRegistry();
+
+	registry.registerMany([]);
+
+	t.is(registry.getToolCount(), 0);
+});
+
+test('ToolRegistry - unregister removes a tool', t => {
+	const registry = new ToolRegistry();
+	const entry = createMockToolEntry();
+
+	registry.register(entry);
+	t.true(registry.hasTool('test-tool'));
+
+	registry.unregister('test-tool');
+	t.false(registry.hasTool('test-tool'));
+});
+
+test('ToolRegistry - unregisterMany removes multiple tools', t => {
+	const registry = new ToolRegistry();
+	registry.registerMany([
+		createMockToolEntry({ name: 'tool1' }),
+		createMockToolEntry({ name: 'tool2' }),
+		createMockToolEntry({ name: 'tool3' })
+	]);
+
+	registry.unregisterMany(['tool1', 'tool3']);
+
+	t.false(registry.hasTool('tool1'));
+	t.true(registry.hasTool('tool2'));
+	t.false(registry.hasTool('tool3'));
+});
+
+test('ToolRegistry - unregisterMany with empty array', t => {
+	const registry = new ToolRegistry();
+	const entry = createMockToolEntry();
+
+	registry.register(entry);
+	registry.unregisterMany([]);
+
+	t.true(registry.hasTool('test-tool'));
+});
+
+test('ToolRegistry - getEntry returns tool entry', t => {
+	const registry = new ToolRegistry();
+	const entry = createMockToolEntry();
+
+	registry.register(entry);
+	const retrieved = registry.getEntry('test-tool');
+
+	t.truthy(retrieved);
+	t.is(retrieved?.name, 'test-tool');
+});
+
+test('ToolRegistry - getEntry returns undefined for non-existent tool', t => {
+	const registry = new ToolRegistry();
+
+	const retrieved = registry.getEntry('non-existent');
+
+	t.is(retrieved, undefined);
+});
+
+test('ToolRegistry - getHandler returns tool handler', t => {
+	const registry = new ToolRegistry();
+	const entry = createMockToolEntry();
+
+	registry.register(entry);
+	const handler = registry.getHandler('test-tool');
+
+	t.truthy(handler);
+	t.is(handler, mockHandler);
+});
+
+test('ToolRegistry - getHandler returns undefined for non-existent tool', t => {
+	const registry = new ToolRegistry();
+
+	const handler = registry.getHandler('non-existent');
+
+	t.is(handler, undefined);
+});
+
+test('ToolRegistry - getFormatter returns tool formatter', t => {
+	const registry = new ToolRegistry();
+	const entry = createMockToolEntry();
+
+	registry.register(entry);
+	const formatter = registry.getFormatter('test-tool');
+
+	t.truthy(formatter);
+	t.is(formatter, mockFormatter);
+});
+
+test('ToolRegistry - getFormatter returns undefined when no formatter', t => {
+	const registry = new ToolRegistry();
+	const entry = createMockToolEntry({ formatter: undefined });
+
+	registry.register(entry);
+	const formatter = registry.getFormatter('test-tool');
+
+	t.is(formatter, undefined);
+});
+
+test('ToolRegistry - getValidator returns tool validator', t => {
+	const registry = new ToolRegistry();
+	const entry = createMockToolEntry();
+
+	registry.register(entry);
+	const validator = registry.getValidator('test-tool');
+
+	t.truthy(validator);
+	t.is(validator, mockValidator);
+});
+
+test('ToolRegistry - getValidator returns undefined when no validator', t => {
+	const registry = new ToolRegistry();
+	const entry = createMockToolEntry({ validator: undefined });
+
+	registry.register(entry);
+	const validator = registry.getValidator('test-tool');
+
+	t.is(validator, undefined);
+});
+
+test('ToolRegistry - getTool returns native AI SDK tool', t => {
+	const registry = new ToolRegistry();
+	const entry = createMockToolEntry();
+
+	registry.register(entry);
+	const tool = registry.getTool('test-tool');
+
+	t.truthy(tool);
+	t.is(tool, mockTool);
+});
+
+test('ToolRegistry - getTool returns undefined for non-existent tool', t => {
+	const registry = new ToolRegistry();
+
+	const tool = registry.getTool('non-existent');
+
+	t.is(tool, undefined);
+});
+
+test('ToolRegistry - getHandlers returns record of all handlers', t => {
+	const registry = new ToolRegistry();
+	const handler1: ToolEntry['handler'] = async () => 'result 1';
+	const handler2: ToolEntry['handler'] = async () => 'result 2';
+
+	registry.registerMany([
+		createMockToolEntry({ name: 'tool1', handler: handler1 }),
+		createMockToolEntry({ name: 'tool2', handler: handler2 })
+	]);
+
+	const handlers = registry.getHandlers();
+
+	t.is(handlers.tool1, handler1);
+	t.is(handlers.tool2, handler2);
+});
+
+test('ToolRegistry - getHandlers returns empty object when no tools', t => {
+	const registry = new ToolRegistry();
+
+	const handlers = registry.getHandlers();
+
+	t.deepEqual(handlers, {});
+});
+
+test('ToolRegistry - getNativeTools returns record of native tools', t => {
+	const registry = new ToolRegistry();
+	const tool1: ToolEntry['tool'] = { execute: async () => 'test 1' } as any;
+	const tool2: ToolEntry['tool'] = { execute: async () => 'test 2' } as any;
+
+	registry.registerMany([
+		createMockToolEntry({ name: 'tool1', tool: tool1 }),
+		createMockToolEntry({ name: 'tool2', tool: tool2 })
+	]);
+
+	const nativeTools = registry.getNativeTools();
+
+	t.truthy(nativeTools.tool1);
+	t.truthy(nativeTools.tool2);
+	t.is(Object.keys(nativeTools).length, 2);
+});
+
+test('ToolRegistry - getNativeTools strips execute (model never auto-runs)', t => {
+	const registry = new ToolRegistry();
+	const tool1: ToolEntry['tool'] = {
+		description: 'd',
+		execute: async () => 'test 1',
+	} as any;
+
+	registry.register(createMockToolEntry({ name: 'tool1', tool: tool1 }));
+
+	const nativeTools = registry.getNativeTools();
+
+	// The model-facing tool keeps its schema/description but has no execute fn;
+	// execution always runs through the registry handler (which validates).
+	t.is((nativeTools.tool1 as { execute?: unknown }).execute, undefined);
+	t.is((nativeTools.tool1 as { description?: string }).description, 'd');
+});
+
+test('ToolRegistry - getAllEntries returns array of all entries', t => {
+	const registry = new ToolRegistry();
+	const entry1 = createMockToolEntry({ name: 'tool1' });
+	const entry2 = createMockToolEntry({ name: 'tool2' });
+
+	registry.registerMany([entry1, entry2]);
+
+	const entries = registry.getAllEntries();
+
+	t.is(entries.length, 2);
+	t.true(entries.some(e => e.name === 'tool1'));
+	t.true(entries.some(e => e.name === 'tool2'));
+});
+
+test('ToolRegistry - getAllEntries returns empty array when no tools', t => {
+	const registry = new ToolRegistry();
+
+	const entries = registry.getAllEntries();
+
+	t.deepEqual(entries, []);
+});
+
+test('ToolRegistry - getToolNames returns array of tool names', t => {
+	const registry = new ToolRegistry();
+	registry.registerMany([
+		createMockToolEntry({ name: 'tool1' }),
+		createMockToolEntry({ name: 'tool2' }),
+		createMockToolEntry({ name: 'tool3' })
+	]);
+
+	const names = registry.getToolNames();
+
+	t.is(names.length, 3);
+	t.true(names.includes('tool1'));
+	t.true(names.includes('tool2'));
+	t.true(names.includes('tool3'));
+});
+
+test('ToolRegistry - getToolNames returns empty array when no tools', t => {
+	const registry = new ToolRegistry();
+
+	const names = registry.getToolNames();
+
+	t.deepEqual(names, []);
+});
+
+test('ToolRegistry - hasTool returns true for registered tool', t => {
+	const registry = new ToolRegistry();
+	registry.register(createMockToolEntry());
+
+	t.true(registry.hasTool('test-tool'));
+});
+
+test('ToolRegistry - hasTool returns false for non-existent tool', t => {
+	const registry = new ToolRegistry();
+
+	t.false(registry.hasTool('non-existent'));
+});
+
+test('ToolRegistry - getToolCount returns correct count', t => {
+	const registry = new ToolRegistry();
+
+	t.is(registry.getToolCount(), 0);
+
+	registry.register(createMockToolEntry());
+	t.is(registry.getToolCount(), 1);
+
+	registry.registerMany([
+		createMockToolEntry({ name: 'tool1' }),
+		createMockToolEntry({ name: 'tool2' })
+	]);
+	t.is(registry.getToolCount(), 3);
+});
+
+test('ToolRegistry - clear removes all tools', t => {
+	const registry = new ToolRegistry();
+	registry.registerMany([
+		createMockToolEntry({ name: 'tool1' }),
+		createMockToolEntry({ name: 'tool2' }),
+		createMockToolEntry({ name: 'tool3' })
+	]);
+
+	registry.clear();
+
+	t.is(registry.getToolCount(), 0);
+	t.false(registry.hasTool('tool1'));
+	t.false(registry.hasTool('tool2'));
+	t.false(registry.hasTool('tool3'));
+});
+
+// ============================================================================
+// readOnly Flag Tests
+// ============================================================================
+
+test('ToolRegistry - register preserves readOnly true', t => {
+	const registry = new ToolRegistry();
+	const entry = createMockToolEntry({ readOnly: true });
+
+	registry.register(entry);
+	const retrieved = registry.getEntry('test-tool');
+
+	t.is(retrieved?.readOnly, true);
+});
+
+test('ToolRegistry - register preserves readOnly false', t => {
+	const registry = new ToolRegistry();
+	const entry = createMockToolEntry({ readOnly: false });
+
+	registry.register(entry);
+	const retrieved = registry.getEntry('test-tool');
+
+	t.is(retrieved?.readOnly, false);
+});
+
+test('ToolRegistry - register preserves readOnly undefined', t => {
+	const registry = new ToolRegistry();
+	const entry = createMockToolEntry();
+	// Default createMockToolEntry doesn't set readOnly
+
+	registry.register(entry);
+	const retrieved = registry.getEntry('test-tool');
+
+	t.is(retrieved?.readOnly, undefined);
+});
+
+test('ToolRegistry - fromRegistries applies readOnly flags', t => {
+	const handler: ToolEntry['handler'] = async () => 'test';
+	const tool: ToolEntry['tool'] = { execute: async () => 'test' } as any;
+
+	const registry = ToolRegistry.fromRegistries(
+		{ tool1: handler, tool2: handler },
+		{ tool1: tool, tool2: tool },
+		undefined,
+		undefined,
+		undefined,
+		{ tool1: true },
+	);
+
+	t.is(registry.getEntry('tool1')?.readOnly, true);
+	t.is(registry.getEntry('tool2')?.readOnly, undefined);
+});
+
+// ============================================================================
+// fromRegistries Tests
+// ============================================================================
+
+test('ToolRegistry - fromRegistries creates registry from records', async t => {
+	const handler1: ToolEntry['handler'] = async () => 'test';
+	const handler2: ToolEntry['handler'] = async () => 'test';
+	const formatter1: ToolEntry['formatter'] = (o) => String(o);
+	const validator1: ToolEntry['validator'] = async () => ({ valid: true });
+	const tool1: ToolEntry['tool'] = { execute: async () => 'test' } as any;
+	const tool2: ToolEntry['tool'] = { execute: async () => 'test' } as any;
+
+	const handlers = { tool1: handler1, tool2: handler2 };
+	const tools = { tool1, tool2 };
+	const formatters = { tool1: formatter1 };
+	const validators = { tool1: validator1 };
+
+	const registry = ToolRegistry.fromRegistries(handlers, tools, formatters, validators);
+
+	t.is(registry.getToolCount(), 2);
+	t.true(registry.hasTool('tool1'));
+	t.true(registry.hasTool('tool2'));
+	// tool1 has a validator, so its handler is wrapped to validate first (not
+	// the same reference) but still produces the handler's output when valid.
+	t.not(registry.getHandler('tool1'), handler1);
+	t.is(await registry.getHandler('tool1')?.({}), 'test');
+	// tool2 has no validator, so its handler is passed through unchanged.
+	t.is(registry.getHandler('tool2'), handler2);
+	t.is(registry.getFormatter('tool1'), formatter1);
+	t.is(registry.getValidator('tool1'), validator1);
+});
+
+test('ToolRegistry - fromRegistries with optional parameters', t => {
+	const handler: ToolEntry['handler'] = async () => 'test';
+	const tool: ToolEntry['tool'] = { execute: async () => 'test' } as any;
+
+	const registry = ToolRegistry.fromRegistries({ tool1: handler }, { tool1: tool });
+
+	t.is(registry.getToolCount(), 1);
+	t.is(registry.getFormatter('tool1'), undefined);
+	t.is(registry.getValidator('tool1'), undefined);
+});
+
+test('ToolRegistry - fromRegistries skips tools without matching handlers', t => {
+	const handler: ToolEntry['handler'] = async () => 'test';
+	const tool: ToolEntry['tool'] = { execute: async () => 'test' } as any;
+
+	const registry = ToolRegistry.fromRegistries(
+		{ tool1: handler }, // Only has handler for tool1
+		{ tool1: tool, tool2: tool } // But tools for tool1 and tool2
+	);
+
+	t.is(registry.getToolCount(), 1);
+	t.true(registry.hasTool('tool1'));
+	t.false(registry.hasTool('tool2'));
+});
+
+test('ToolRegistry - fromToolExports forwards the abort signal to execute', async t => {
+	let seen: AbortSignal | undefined;
+	const controller = new AbortController();
+
+	// inputSchema.jsonSchema is what every real tool export carries, so this is
+	// the wrapped-by-validation path: if the wrapper drops its options, Stop
+	// stops reaching long-running tools (agent, execute_bash) entirely.
+	const registry = ToolRegistry.fromToolExports([
+		{
+			name: 'slow-tool',
+			tool: {
+				inputSchema: {
+					jsonSchema: {
+						type: 'object',
+						properties: { path: { type: 'string' } },
+					},
+				},
+				execute: async (_args: unknown, opts: { abortSignal?: AbortSignal }) => {
+					seen = opts?.abortSignal;
+					return 'done';
+				},
+			} as any,
+		},
+	]);
+
+	const handler = registry.getHandler('slow-tool');
+	t.truthy(handler);
+	await handler?.({ path: 'a.ts' }, { abortSignal: controller.signal });
+	t.is(seen, controller.signal);
+});

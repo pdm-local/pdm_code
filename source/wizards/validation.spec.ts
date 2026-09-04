@@ -1,0 +1,602 @@
+import test from 'ava';
+import type {ProviderConfig} from '../types/config.js';
+import type {McpServerConfig} from './templates/mcp-templates.js';
+import {
+	buildConfigObject,
+	buildProviderConfigObject,
+	testProviderConnection,
+	validateConfig,
+} from './validation.js';
+
+// ============================================================================
+// Tests for validateConfig
+// ============================================================================
+
+test('validateConfig: returns valid for correct configuration', t => {
+	const providers: ProviderConfig[] = [
+		{
+			name: 'ollama',
+			baseUrl: 'http://localhost:11434',
+			models: ['llama2'],
+		},
+	];
+
+	const mcpServers: Record<string, McpServerConfig> = {
+		filesystem: {
+			name: 'filesystem',
+			transport: 'stdio',
+			command: 'npx',
+			args: ['-y', '@modelcontextprotocol/server-filesystem', '/tmp'],
+		},
+	};
+
+	const result = validateConfig(providers, mcpServers);
+
+	t.true(result.valid);
+	t.is(result.errors.length, 0);
+	t.is(result.warnings.length, 0);
+});
+
+test('validateConfig: warns when no providers configured', t => {
+	const providers: ProviderConfig[] = [];
+	const mcpServers: Record<string, McpServerConfig> = {};
+
+	const result = validateConfig(providers, mcpServers);
+
+	t.true(result.valid); // Warnings don't invalidate, only errors do
+	t.is(result.warnings.length, 1);
+	t.regex(result.warnings[0], /No providers configured/);
+});
+
+test('validateConfig: errors when provider missing name', t => {
+	const providers: ProviderConfig[] = [
+		{
+			name: '',
+			baseUrl: 'http://localhost:11434',
+			models: ['llama2'],
+		},
+	];
+
+	const result = validateConfig(providers, {});
+
+	t.false(result.valid);
+	t.is(result.errors.length, 1);
+	t.regex(result.errors[0], /Provider missing name/);
+});
+
+test('validateConfig: errors when provider has no models', t => {
+	const providers: ProviderConfig[] = [
+		{
+			name: 'ollama',
+			baseUrl: 'http://localhost:11434',
+			models: [],
+		},
+	];
+
+	const result = validateConfig(providers, {});
+
+	t.false(result.valid);
+	t.is(result.errors.length, 1);
+	t.regex(result.errors[0], /has no models configured/);
+});
+
+test('validateConfig: errors when provider has invalid base URL', t => {
+	const providers: ProviderConfig[] = [
+		{
+			name: 'ollama',
+			baseUrl: 'not-a-valid-url',
+			models: ['llama2'],
+		},
+	];
+
+	const result = validateConfig(providers, {});
+
+	t.false(result.valid);
+	t.is(result.errors.length, 1);
+	t.regex(result.errors[0], /invalid base URL/);
+});
+
+test('validateConfig: errors when MCP server missing command', t => {
+	const providers: ProviderConfig[] = [
+		{
+			name: 'ollama',
+			baseUrl: 'http://localhost:11434',
+			models: ['llama2'],
+		},
+	];
+
+	const mcpServers = {
+		filesystem: {
+			name: 'filesystem',
+			args: ['-y', '@modelcontextprotocol/server-filesystem', '/tmp'],
+		},
+	} as unknown as Record<string, McpServerConfig>;
+
+	const result = validateConfig(providers, mcpServers);
+
+	t.false(result.valid);
+	t.is(result.errors.length, 1);
+	t.regex(result.errors[0], /missing command/);
+});
+
+test('validateConfig: errors when MCP server missing args', t => {
+	const providers: ProviderConfig[] = [
+		{
+			name: 'ollama',
+			baseUrl: 'http://localhost:11434',
+			models: ['llama2'],
+		},
+	];
+
+	const mcpServers = {
+		filesystem: {name: 'filesystem', transport: 'stdio', command: 'npx'},
+	} as unknown as Record<string, McpServerConfig>;
+
+	const result = validateConfig(providers, mcpServers);
+
+	t.false(result.valid);
+	t.is(result.errors.length, 1);
+	t.regex(result.errors[0], /missing args array/);
+});
+
+test('validateConfig: errors when alwaysAllow is not an array', t => {
+	const providers: ProviderConfig[] = [
+		{
+			name: 'ollama',
+			baseUrl: 'http://localhost:11434',
+			models: ['llama2'],
+		},
+	];
+
+	const mcpServers = {
+		filesystem: {
+			name: 'filesystem',
+			transport: 'stdio',
+			command: 'npx',
+			args: ['-y', '@modelcontextprotocol/server-filesystem', '/tmp'],
+			alwaysAllow: 'not-an-array',
+		},
+	} as unknown as Record<string, McpServerConfig>;
+
+	const result = validateConfig(providers, mcpServers);
+
+	t.false(result.valid);
+	t.regex(result.errors[0], /alwaysAllow/);
+});
+
+test('validateConfig: errors when alwaysAllow contains non-strings', t => {
+	const providers: ProviderConfig[] = [
+		{
+			name: 'ollama',
+			baseUrl: 'http://localhost:11434',
+			models: ['llama2'],
+		},
+	];
+
+	const mcpServers = {
+		filesystem: {
+			name: 'filesystem',
+			transport: 'stdio',
+			command: 'npx',
+			args: ['-y', '@modelcontextprotocol/server-filesystem', '/tmp'],
+			alwaysAllow: ['ok', 123],
+		},
+	} as unknown as Record<string, McpServerConfig>;
+
+	const result = validateConfig(providers, mcpServers);
+
+	t.false(result.valid);
+	t.regex(result.errors[0], /non-string/);
+});
+
+test('validateConfig: accumulates multiple errors', t => {
+	const providers: ProviderConfig[] = [
+		{
+			name: '',
+			baseUrl: 'invalid-url',
+			models: [],
+		},
+		{
+			name: 'provider2',
+			baseUrl: 'http://localhost:11434',
+			models: [],
+		},
+	];
+
+	const result = validateConfig(providers, {});
+
+	t.false(result.valid);
+	t.true(result.errors.length >= 3); // Missing name, invalid URL, no models (×2)
+});
+
+// ============================================================================
+// Tests for buildConfigObject
+// ============================================================================
+
+test('buildConfigObject: builds correct config with providers only', t => {
+	const providers: ProviderConfig[] = [
+		{
+			name: 'ollama',
+			baseUrl: 'http://localhost:11434',
+			models: ['llama2', 'codellama'],
+		},
+	];
+
+	const config = buildConfigObject(providers, {});
+
+	t.truthy(config.pdm);
+	t.is(config.pdm.providers.length, 1);
+	t.is(config.pdm.providers[0].name, 'ollama');
+	t.is(config.pdm.providers[0].baseUrl, 'http://localhost:11434');
+	t.deepEqual(config.pdm.providers[0].models, ['llama2', 'codellama']);
+	t.is(config.pdm.mcpServers, undefined);
+});
+
+test('buildConfigObject: includes MCP servers when provided', t => {
+	const providers: ProviderConfig[] = [
+		{
+			name: 'ollama',
+			baseUrl: 'http://localhost:11434',
+			models: ['llama2'],
+		},
+	];
+
+	const mcpServers: Record<string, McpServerConfig> = {
+		filesystem: {
+			name: 'filesystem',
+			transport: 'stdio',
+			command: 'npx',
+			args: ['-y', '@modelcontextprotocol/server-filesystem', '/tmp'],
+		},
+	};
+
+	const config = buildConfigObject(providers, mcpServers);
+
+	t.truthy(config.pdm.mcpServers);
+	t.true(Array.isArray(config.pdm.mcpServers));
+	const filesystemServer = config.pdm.mcpServers?.find(
+		s => s.name === 'filesystem',
+	);
+	t.truthy(filesystemServer);
+	t.is(filesystemServer?.command, 'npx');
+});
+
+test('buildConfigObject: includes apiKey when present', t => {
+	const providers: ProviderConfig[] = [
+		{
+			name: 'openai',
+			apiKey: 'sk-test-key',
+			models: ['gpt-4'],
+		},
+	];
+
+	const config = buildConfigObject(providers, {});
+
+	t.is(config.pdm.providers[0].apiKey, 'sk-test-key');
+});
+
+test('buildConfigObject: includes organizationId when present', t => {
+	const providers: ProviderConfig[] = [
+		{
+			name: 'openai',
+			organizationId: 'org-123',
+			models: ['gpt-4'],
+		},
+	];
+
+	const config = buildConfigObject(providers, {});
+
+	t.is(config.pdm.providers[0].organizationId, 'org-123');
+});
+
+test('buildConfigObject: includes timeout when present', t => {
+	const providers: ProviderConfig[] = [
+		{
+			name: 'ollama',
+			baseUrl: 'http://localhost:11434',
+			timeout: 30000,
+			models: ['llama2'],
+		},
+	];
+
+	const config = buildConfigObject(providers, {});
+
+	t.is(config.pdm.providers[0].timeout, 30000);
+});
+
+test('buildConfigObject: omits optional fields when not present', t => {
+	const providers: ProviderConfig[] = [
+		{
+			name: 'ollama',
+			baseUrl: 'http://localhost:11434',
+			models: ['llama2'],
+		},
+	];
+
+	const config = buildConfigObject(providers, {});
+
+	t.is(config.pdm.providers[0].apiKey, undefined);
+	t.is(config.pdm.providers[0].organizationId, undefined);
+	t.is(config.pdm.providers[0].timeout, undefined);
+});
+
+test('buildConfigObject: handles multiple providers', t => {
+	const providers: ProviderConfig[] = [
+		{
+			name: 'ollama',
+			baseUrl: 'http://localhost:11434',
+			models: ['llama2'],
+		},
+		{
+			name: 'openai',
+			apiKey: 'sk-test',
+			models: ['gpt-4'],
+		},
+	];
+
+	const config = buildConfigObject(providers, {});
+
+	t.is(config.pdm.providers.length, 2);
+	t.is(config.pdm.providers[0].name, 'ollama');
+	t.is(config.pdm.providers[1].name, 'openai');
+});
+
+test('buildConfigObject: handles multiple MCP servers', t => {
+	const providers: ProviderConfig[] = [
+		{
+			name: 'ollama',
+			baseUrl: 'http://localhost:11434',
+			models: ['llama2'],
+		},
+	];
+
+	const mcpServers: Record<string, McpServerConfig> = {
+		filesystem: {
+			name: 'filesystem',
+			transport: 'stdio',
+			command: 'npx',
+			args: ['-y', '@modelcontextprotocol/server-filesystem', '/tmp'],
+		},
+		github: {
+			name: 'github',
+			transport: 'stdio',
+			command: 'npx',
+			args: ['-y', '@modelcontextprotocol/server-github'],
+			env: {GITHUB_TOKEN: 'token'},
+		},
+	};
+
+	const config = buildConfigObject(providers, mcpServers);
+
+	t.is(Object.keys(config.pdm.mcpServers ?? {}).length, 2);
+	const filesystemServer = config.pdm.mcpServers?.find(
+		s => s.name === 'filesystem',
+	);
+	const githubServer = config.pdm.mcpServers?.find(
+		s => s.name === 'github',
+	);
+	t.truthy(filesystemServer);
+	t.truthy(githubServer);
+});
+
+// ============================================================================
+// Tests for testProviderConnection
+// ============================================================================
+
+test('testProviderConnection: returns connected=true when no baseUrl', async t => {
+	const provider: ProviderConfig = {
+		name: 'openai',
+		models: ['gpt-4'],
+	};
+
+	const result = await testProviderConnection(provider);
+
+	t.is(result.providerName, 'openai');
+	t.true(result.connected);
+	t.is(result.error, undefined);
+});
+
+test('testProviderConnection: returns connected=true for non-localhost URLs', async t => {
+	const provider: ProviderConfig = {
+		name: 'openai',
+		baseUrl: 'https://api.openai.com',
+		models: ['gpt-4'],
+	};
+
+	const result = await testProviderConnection(provider);
+
+	t.is(result.providerName, 'openai');
+	t.true(result.connected);
+});
+
+test('testProviderConnection: returns connected=false for unreachable localhost', async t => {
+	const provider: ProviderConfig = {
+		name: 'ollama',
+		baseUrl: 'http://localhost:99999',
+		models: ['llama2'],
+	};
+
+	const result = await testProviderConnection(provider, 1000);
+
+	t.is(result.providerName, 'ollama');
+	t.false(result.connected);
+	t.truthy(result.error);
+});
+
+test('testProviderConnection: returns connected=true for reachable localhost', async t => {
+	// This test requires a mock server or integration setup
+	// For now, we'll test with a common localhost port that might have a service
+	// In CI, this might fail if the service isn't available
+	const provider: ProviderConfig = {
+		name: 'ollama',
+		baseUrl: 'http://localhost:11434',
+		models: ['llama2'],
+	};
+
+	try {
+		const result = await testProviderConnection(provider, 1000);
+		t.is(result.providerName, 'ollama');
+		// Result depends on whether Ollama is running
+		t.truthy(typeof result.connected === 'boolean');
+	} catch {
+		// If fetch is not available or times out, that's acceptable
+		t.pass();
+	}
+});
+
+// ============================================================================
+test('buildConfigObject: includes caCertPath when present', t => {
+	const providers = [
+		{
+			name: 'Custom Provider',
+			baseUrl: 'https://api.example.com/v1',
+			caCertPath: '/tmp/custom-ca.pem',
+			models: ['model-1'],
+		},
+	];
+
+	const config = buildConfigObject(providers, {});
+
+	t.is(config.pdm.providers[0].caCertPath, '/tmp/custom-ca.pem');
+});
+
+// Tests for sdkProvider field
+// ============================================================================
+
+test('buildConfigObject: includes sdkProvider when present', t => {
+	const providers: ProviderConfig[] = [
+		{
+			name: 'Gemini',
+			sdkProvider: 'google',
+			apiKey: 'test-key',
+			models: ['gemini-2.5-flash'],
+		},
+	];
+
+	const config = buildConfigObject(providers, {});
+
+	t.is(config.pdm.providers[0].sdkProvider, 'google');
+});
+
+test('buildConfigObject: omits sdkProvider when not present', t => {
+	const providers: ProviderConfig[] = [
+		{
+			name: 'ollama',
+			baseUrl: 'http://localhost:11434',
+			models: ['llama2'],
+		},
+	];
+
+	const config = buildConfigObject(providers, {});
+
+	t.is(config.pdm.providers[0].sdkProvider, undefined);
+});
+
+test('buildConfigObject: handles Gemini provider with all fields', t => {
+	const providers: ProviderConfig[] = [
+		{
+			name: 'Gemini',
+			sdkProvider: 'google',
+			baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
+			apiKey: 'test-api-key',
+			models: ['gemini-3-flash-preview', 'gemini-3-pro-preview'],
+		},
+	];
+
+	const config = buildConfigObject(providers, {});
+
+	t.is(config.pdm.providers[0].name, 'Gemini');
+	t.is(config.pdm.providers[0].sdkProvider, 'google');
+	t.is(config.pdm.providers[0].baseUrl, 'https://generativelanguage.googleapis.com/v1beta');
+	t.is(config.pdm.providers[0].apiKey, 'test-api-key');
+	t.deepEqual(config.pdm.providers[0].models, ['gemini-3-flash-preview', 'gemini-3-pro-preview']);
+});
+
+test('buildConfigObject: handles GitHub Copilot provider with sdkProvider github-copilot', t => {
+	const providers: ProviderConfig[] = [
+		{
+			name: 'GitHub Copilot',
+			sdkProvider: 'github-copilot',
+			baseUrl: 'https://api.githubcopilot.com',
+			models: ['gpt-4o', 'claude-3-5-sonnet-20241022'],
+		},
+	];
+
+	const config = buildConfigObject(providers, {});
+
+	const p = config.pdm.providers[0];
+	t.is(p.name, 'GitHub Copilot');
+	t.is(p.sdkProvider, 'github-copilot');
+	t.is(p.baseUrl, 'https://api.githubcopilot.com');
+	t.deepEqual(p.models, ['gpt-4o', 'claude-3-5-sonnet-20241022']);
+});
+
+// ============================================================================
+// Tests for buildProviderConfigObject, openrouter block round-trip
+// ============================================================================
+
+test('buildProviderConfigObject: preserves the openrouter block on disk', t => {
+	const providers: ProviderConfig[] = [
+		{
+			name: 'OpenRouter',
+			baseUrl: 'https://openrouter.ai/api/v1',
+			apiKey: 'test-key',
+			models: ['anthropic/claude-3.5-sonnet'],
+			openrouter: {
+				service_tier: 'flex',
+				reasoning: {effort: 'high'},
+				provider: {sort: 'price', allow_fallbacks: true},
+				models: ['openai/gpt-4o'],
+			},
+		},
+	];
+
+	const config = buildProviderConfigObject({providers, modeProviders: {}});
+	const p = config.pdm.providers[0];
+
+	t.deepEqual(p?.openrouter, {
+		service_tier: 'flex',
+		reasoning: {effort: 'high'},
+		provider: {sort: 'price', allow_fallbacks: true},
+		models: ['openai/gpt-4o'],
+	});
+});
+
+test('buildProviderConfigObject: omits openrouter when undefined', t => {
+	const providers: ProviderConfig[] = [
+		{
+			name: 'OpenRouter',
+			baseUrl: 'https://openrouter.ai/api/v1',
+			apiKey: 'test-key',
+			models: ['anthropic/claude-3.5-sonnet'],
+		},
+	];
+
+	const config = buildProviderConfigObject({providers, modeProviders: {}});
+	const p = config.pdm.providers[0];
+
+	t.false('openrouter' in (p ?? {}));
+});
+
+test('buildProviderConfigObject: openrouter block survives wizard buildConfig round-trip', t => {
+	// Mirrors what the wizard does: template.buildConfig produces a
+	// ProviderConfig; buildProviderConfigObject serialises it for disk.
+	// If anything along that chain drops openrouter, this fails, which is
+	// exactly the regression that motivated the test.
+	const fromWizard: ProviderConfig = {
+		name: 'OpenRouter',
+		baseUrl: 'https://openrouter.ai/api/v1',
+		apiKey: 'sk-test',
+		models: ['x/y'],
+		openrouter: {
+			service_tier: 'priority',
+			reasoning: {effort: 'medium'},
+		},
+	};
+
+	const config = buildProviderConfigObject({providers: [fromWizard], modeProviders: {}});
+	const p = config.pdm.providers[0];
+
+	t.is(p?.openrouter?.service_tier, 'priority');
+	t.is(p?.openrouter?.reasoning?.effort, 'medium');
+});
