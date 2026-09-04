@@ -628,6 +628,64 @@ export default function App({
 		});
 	}, [showWelcome, nonInteractiveMode, initialDevelopmentMode]);
 
+	// Declared here, above the conditional returns below (trust prompt, trust
+	// error, VS Code prompt). Placed after them it was a hook that only ran on
+	// some renders, so accepting the trust prompt changed the hook count from
+	// 227 to 228 and React threw "Rendered more hooks than during the previous
+	// render" on the very first run in any new directory.
+	// Memoized because ChatHistory is wrapped in React.memo and takes this as a
+	// prop: building a fresh element on every render defeated that memo outright,
+	// so the whole transcript pane reconciled on every unrelated state change
+	// (context percentage, spinner ticks, token counts). Now it changes only when
+	// the streamed content itself does.
+	//
+	// While a turn is in flight but nothing has streamed back, show that we are
+	// waiting rather than rendering nothing. Against a local model this window
+	// is the weights loading into memory, so `null` here meant 10-60 seconds of
+	// blank screen with no sign the app was alive.
+	const liveComponent = useMemo(() => {
+		if (appState.liveComponent) return appState.liveComponent;
+		if (!chatHandler.isGenerating) return null;
+
+		const hasStreamedOutput = Boolean(
+			chatHandler.streamingContent || chatHandler.streamingReasoning,
+		);
+		if (!hasStreamedOutput) {
+			return <WaitingIndicator model={appState.currentModel} />;
+		}
+
+		return (
+			<>
+				{chatHandler.streamingReasoning && !chatHandler.streamingContent && (
+					<StreamingReasoning
+						reasoning={chatHandler.streamingReasoning}
+						expand={appState.reasoningExpanded}
+					/>
+				)}
+				{/* Reasoning stream is complete when text streaming begins */}
+				{chatHandler.streamingReasoning && chatHandler.streamingContent && (
+					<AssistantReasoning
+						reasoning={chatHandler.streamingReasoning}
+						expand={appState.reasoningExpanded}
+					/>
+				)}
+				{chatHandler.streamingContent && (
+					<StreamingMessage
+						message={chatHandler.streamingContent}
+						model={appState.currentModel}
+					/>
+				)}
+			</>
+		);
+	}, [
+		appState.liveComponent,
+		appState.reasoningExpanded,
+		appState.currentModel,
+		chatHandler.isGenerating,
+		chatHandler.streamingContent,
+		chatHandler.streamingReasoning,
+	]);
+
 	// Handle loading state for directory trust check
 	if (isTrustLoading) {
 		logger.debug('Directory trust check in progress');
@@ -712,59 +770,6 @@ export default function App({
 			</ThemeContext.Provider>
 		);
 	}
-
-	// Memoized because ChatHistory is wrapped in React.memo and takes this as a
-	// prop: building a fresh element on every render defeated that memo outright,
-	// so the whole transcript pane reconciled on every unrelated state change
-	// (context percentage, spinner ticks, token counts). Now it changes only when
-	// the streamed content itself does.
-	//
-	// While a turn is in flight but nothing has streamed back, show that we are
-	// waiting rather than rendering nothing. Against a local model this window
-	// is the weights loading into memory, so `null` here meant 10-60 seconds of
-	// blank screen with no sign the app was alive.
-	const liveComponent = useMemo(() => {
-		if (appState.liveComponent) return appState.liveComponent;
-		if (!chatHandler.isGenerating) return null;
-
-		const hasStreamedOutput = Boolean(
-			chatHandler.streamingContent || chatHandler.streamingReasoning,
-		);
-		if (!hasStreamedOutput) {
-			return <WaitingIndicator model={appState.currentModel} />;
-		}
-
-		return (
-			<>
-				{chatHandler.streamingReasoning && !chatHandler.streamingContent && (
-					<StreamingReasoning
-						reasoning={chatHandler.streamingReasoning}
-						expand={appState.reasoningExpanded}
-					/>
-				)}
-				{/* Reasoning stream is complete when text streaming begins */}
-				{chatHandler.streamingReasoning && chatHandler.streamingContent && (
-					<AssistantReasoning
-						reasoning={chatHandler.streamingReasoning}
-						expand={appState.reasoningExpanded}
-					/>
-				)}
-				{chatHandler.streamingContent && (
-					<StreamingMessage
-						message={chatHandler.streamingContent}
-						model={appState.currentModel}
-					/>
-				)}
-			</>
-		);
-	}, [
-		appState.liveComponent,
-		appState.reasoningExpanded,
-		appState.currentModel,
-		chatHandler.isGenerating,
-		chatHandler.streamingContent,
-		chatHandler.streamingReasoning,
-	]);
 
 	// Non-interactive render tree, minimal transcript + one status line,
 	// no interactive affordances.

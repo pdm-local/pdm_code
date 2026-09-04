@@ -15,6 +15,17 @@ pdm run "add tests for the auth module"     # non-interactive
 
 Linux, macOS and Windows. Node.js 22 or newer.
 
+<p align="center">
+  <img src="docs/assets/screenshot-welcome.svg" alt="PDM Code starting up in a terminal" width="720">
+</p>
+
+A real session against a local model. The agent reads the file with its
+`read_file` tool, then answers:
+
+<p align="center">
+  <img src="docs/assets/screenshot-session.svg" alt="PDM Code reading a file and reporting a bug in it" width="720">
+</p>
+
 ---
 
 ## Why it exists
