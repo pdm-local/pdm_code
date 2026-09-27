@@ -82,6 +82,24 @@ one runs the server, checks it, and writes the file for you. If the check fails
 because Ollama is still bound to loopback, it prints the exact command above for
 that device's operating system.
 
+### If the connection times out rather than being refused
+
+A refused connection means Ollama is up but bound to loopback. A **timeout**
+means the packets are being dropped, and a firewall is the usual reason: a
+dropped packet times out where a closed port would be refused, so a correctly
+configured Ollama behind a firewall looks identical to a sleeping machine.
+
+On Linux with ufw, allow the port on the private interface only:
+
+```bash
+sudo ufw allow in on tailscale0 to any port 11434 proto tcp
+```
+
+Scoping the rule to that interface is the point. Combined with
+`OLLAMA_HOST=0.0.0.0`, it keeps `localhost` working for the agent running on
+that same machine while leaving the port closed to your local network, which
+matters because Ollama has no authentication.
+
 ### Context length on a shared server
 
 A model is served with whatever `num_ctx` is baked into it on **that** machine,

@@ -236,10 +236,17 @@ test('refused gives the Windows command for a Windows server', t => {
 	t.notRegex(output, /systemctl/);
 });
 
-test('timeout points at the device being asleep or off the network', t => {
+test('timeout names the firewall as well as a sleeping device', t => {
+	// Verified against a real pairing: Ollama was correctly bound to 0.0.0.0 and
+	// serving, but ufw dropped the packets, so the symptom was a timeout. Advice
+	// that only mentions sleep sends the user to the wrong machine.
 	const output = renderNotice('timeout');
 	t.regex(output, /did not answer in time/);
 	t.regex(output, /asleep/);
+	t.regex(output, /firewall is dropping the port/);
+	t.regex(output, /ufw allow in on tailscale0 to any port 11434/);
+	// Interface-scoped, because Ollama has no auth to protect the LAN side.
+	t.regex(output, /closed to\s+your local network/);
 	// Not a loopback problem, so the OLLAMA_HOST advice must not appear.
 	t.notRegex(output, /OLLAMA_HOST/);
 });

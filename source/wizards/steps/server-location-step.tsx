@@ -283,11 +283,30 @@ export function FailureNotice({
 			)}
 
 			{reason === 'timeout' && (
-				<Box marginBottom={1}>
-					<Text color={colors.secondary}>
-						The device may be asleep, or off the private network. Check it is
-						awake and connected.
+				<Box flexDirection="column" marginBottom={1}>
+					<Text color={colors.text}>
+						Nothing refused the connection, so either the device is asleep or
+						off the private network, or a firewall is dropping the port. A
+						dropped packet times out where a closed port would be refused, so a
+						running Ollama behind a firewall looks exactly like this.
 					</Text>
+					<Box marginTop={1}>
+						<Text color={colors.secondary}>
+							If Ollama is running there, allow the port on the private
+							interface only:
+						</Text>
+					</Box>
+					<Box marginLeft={2}>
+						<Text color={colors.secondary}>
+							sudo ufw allow in on tailscale0 to any port 11434 proto tcp
+						</Text>
+					</Box>
+					<Box marginTop={1}>
+						<Text color={colors.secondary}>
+							Scoping the rule to that interface leaves the port closed to your
+							local network, which matters because Ollama has no authentication.
+						</Text>
+					</Box>
 				</Box>
 			)}
 
