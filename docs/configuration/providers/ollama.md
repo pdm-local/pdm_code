@@ -26,6 +26,70 @@ No API key is required for local use.
 2. Pull a model: `ollama pull your-model-name`
 3. Ollama starts automatically and serves on port `11434`
 
+## Using a shared server on another device
+
+One machine usually has the GPU. PDM Code runs on each of your devices and talks
+to that one server, so your files and tool calls stay local and only prompts and
+generated tokens cross the network.
+
+On the machine with the models, tell Ollama to listen on the network interface
+rather than loopback. **Bind the private address, not `0.0.0.0`**: Ollama has no
+authentication, so `0.0.0.0` serves every machine that can reach the port,
+including everything else on your local network. A private mesh VPN such as
+Tailscale is the right way to reach it, because it authenticates and encrypts at
+the network layer, which is the only thing standing in for the auth Ollama lacks.
+
+Linux:
+
+```bash
+sudo systemctl edit ollama
+```
+
+```
+[Service]
+Environment="OLLAMA_HOST=YOUR-PRIVATE-ADDRESS:11434"
+```
+
+```bash
+sudo systemctl restart ollama
+```
+
+Windows, then sign out and back in:
+
+```powershell
+setx OLLAMA_HOST YOUR-PRIVATE-ADDRESS:11434
+```
+
+macOS:
+
+```bash
+launchctl setenv OLLAMA_HOST YOUR-PRIVATE-ADDRESS:11434
+```
+
+Then on the other devices, point a provider at it:
+
+```json
+{
+	"name": "Ollama",
+	"baseUrl": "http://YOUR-PRIVATE-ADDRESS:11434/v1",
+	"models": ["your-model-name"]
+}
+```
+
+You do not normally have to write this by hand. When PDM Code starts with no
+configuration and finds other devices on the same private network, it asks which
+one runs the server, checks it, and writes the file for you. If the check fails
+because Ollama is still bound to loopback, it prints the exact command above for
+that device's operating system.
+
+### Context length on a shared server
+
+A model is served with whatever `num_ctx` is baked into it on **that** machine,
+which need not match your local copies. The setup step reads the real value per
+model and records it as `contextWindows`, so the agent budgets against what the
+server will actually honour rather than truncating silently. When the server does
+not report a value, the field is left out rather than guessed.
+
 ## Context Length
 
 By default, Ollama uses a 2048 token context window which is too small for agentic coding. Set the context length as high as your system's memory can handle. Larger context means the model can track more of the conversation history, tool calls, and file contents.

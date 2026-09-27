@@ -4,6 +4,7 @@ import {useEffect, useRef, useState} from 'react';
 import {StyledSelectInput} from '@/components/ui/styled-select-input';
 import {getColors} from '@/config/index';
 import {useResponsiveTerminal} from '@/hooks/useTerminalWidth';
+import {getOllamaNumCtx} from '@/models/ollama-capabilities';
 import type {ProviderConfig} from '../../types/config';
 import {
 	PROVIDER_TEMPLATES,
@@ -16,6 +17,7 @@ import {
 } from '../utils/fetch-models';
 import {FieldInputView} from './field-input-view';
 import {ModelSelectionList} from './model-selection-list';
+import {ServerLocationStep} from './server-location-step';
 import {useListLimit} from './use-list-limit';
 import {useWizardForm} from './use-wizard-form';
 
@@ -53,6 +55,8 @@ function findProviderIndex(
 type Mode =
 	| 'select-template-or-custom'
 	| 'template-selection'
+	| 'server-location'
+	| 'reading-context'
 	| 'edit-selection'
 	| 'edit-or-delete'
 	| 'field-input'
@@ -97,6 +101,34 @@ export function findTemplateForProvider(
 	}
 
 	return PROVIDER_TEMPLATES.find(t => t.id === 'custom');
+}
+
+/**
+ * Ask the server what context window each configured model is actually served
+ * with, and record only the answers it gave.
+ *
+ * Probes run together: they share one memoized `/api/show` per model, so the
+ * cost is roughly a single round trip rather than one per model. A model the
+ * server will not answer for is left out entirely, because a guessed window is
+ * the exact failure this is meant to prevent.
+ */
+async function attachContextWindows(
+	provider: ProviderConfig,
+): Promise<ProviderConfig> {
+	const probed = await Promise.all(
+		provider.models.map(async model => ({
+			model,
+			numCtx: await getOllamaNumCtx(provider.baseUrl, model),
+		})),
+	);
+
+	const contextWindows: Record<string, number> = {};
+	for (const {model, numCtx} of probed) {
+		if (numCtx !== null) contextWindows[model] = numCtx;
+	}
+
+	if (Object.keys(contextWindows).length === 0) return provider;
+	return {...provider, contextWindows};
 }
 
 export function ProviderStep({
@@ -243,8 +275,11 @@ export function ProviderStep({
 		if (template) {
 			setEditingIndex(null); // Not editing
 			beginTemplate(template);
-			setMode('field-input');
 			setCameFromCustom(false);
+			// A server the user hosts may be on another of their machines, so ask
+			// where it is before asking for a URL. Editing skips this: the address
+			// is already known and re-probing would just be in the way.
+			setMode(template.localServer ? 'server-location' : 'field-input');
 		}
 	};
 
@@ -518,6 +553,20 @@ export function ProviderStep({
 			try {
 				const providerConfig = selectedTemplate.buildConfig(newAnswers);
 
+				// A self-hosted server serves each tag at whatever `num_ctx` is baked
+				// into it, which differs between machines. Record it so the agent
+				// budgets against the real window instead of silently overrunning it.
+				// Non-Ollama servers have no `/api/show`, so this returns null for
+				// them and the field is simply omitted.
+				if (selectedTemplate.localServer && providerConfig.baseUrl) {
+					setMode('reading-context');
+					void attachContextWindows(providerConfig).then(withWindows => {
+						if (!isMountedRef.current) return;
+						commitProvider(withWindows);
+					});
+					return;
+				}
+
 				if (editingIndex !== null) {
 					const newProviders = [...providers];
 					newProviders[editingIndex] = providerConfig;
@@ -542,6 +591,22 @@ export function ProviderStep({
 				);
 			}
 		}
+	};
+
+	/** Store a finished provider and return to the root menu. */
+	const commitProvider = (providerConfig: ProviderConfig) => {
+		if (editingIndex !== null) {
+			const newProviders = [...providers];
+			newProviders[editingIndex] = providerConfig;
+			setProviders(newProviders);
+		} else {
+			setProviders([...providers, providerConfig]);
+		}
+		resetForm();
+		setEditingIndex(null);
+		setFetchedModels([]);
+		setSelectedModelIds(new Set());
+		setMode('select-template-or-custom');
 	};
 
 	const handleModelSelectionBack = () => {
@@ -599,6 +664,13 @@ export function ProviderStep({
 					onBack();
 				}
 			}
+			return;
+		}
+
+		if (mode === 'server-location' && key.escape) {
+			// Back to the provider list, same as escaping out of field input.
+			setMode('template-selection');
+			resetForm();
 			return;
 		}
 
@@ -705,6 +777,36 @@ export function ProviderStep({
 					onSelect={(item: {value: string}) => handleEditOrDeleteChoice(item)}
 				/>
 			</Box>
+		);
+	}
+
+	if (mode === 'reading-context') {
+		return (
+			<Box>
+				<Text color={colors.primary}>
+					<Spinner type="dots" />
+				</Text>
+				<Text color={colors.secondary}> Reading model context sizes...</Text>
+			</Box>
+		);
+	}
+
+	if (mode === 'server-location' && selectedTemplate) {
+		const baseUrlField = selectedTemplate.fields.find(
+			f => f.name === 'baseUrl',
+		);
+		return (
+			<ServerLocationStep
+				serverName={selectedTemplate.name}
+				defaultBaseUrl={baseUrlField?.default ?? ''}
+				onSelect={baseUrl => {
+					// Re-seed the form so the base URL field arrives filled in; the
+					// user still sees and can edit it.
+					beginTemplate(selectedTemplate, {baseUrl});
+					setMode('field-input');
+				}}
+				onManual={() => setMode('field-input')}
+			/>
 		);
 	}
 

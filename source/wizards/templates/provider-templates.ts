@@ -38,6 +38,12 @@ export interface ProviderTemplate {
 	name: string;
 	fields: TemplateField[];
 	buildConfig: (answers: Record<string, string>) => ProviderConfig;
+	/**
+	 * A server the user runs themselves, so it may live on another of their
+	 * machines. The wizard offers to locate it before asking for a base URL.
+	 * Set by `localServerTemplate`, so a new local server gets this for free.
+	 */
+	localServer?: boolean;
 }
 
 const urlValidator = (value: string): string | undefined => {
@@ -177,6 +183,7 @@ function localServerTemplate(opts: {
 	return {
 		id: opts.id,
 		name: opts.name,
+		localServer: true,
 		fields: [
 			{
 				name: 'providerName',

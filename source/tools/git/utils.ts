@@ -62,7 +62,7 @@ export interface CommitInfo {
  * 30-80ms to start. A binary that exists but is broken fails later at call
  * time with a clear error, exactly as it would have with a version probe.
  */
-function isBinaryOnPath(name: string): boolean {
+export function isBinaryOnPath(name: string): boolean {
 	const pathValue = process.env.PATH;
 	if (!pathValue) return false;
 

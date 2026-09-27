@@ -2,6 +2,7 @@ import {createServer, type Server} from 'node:http';
 import type {AddressInfo} from 'node:net';
 import test from 'ava';
 import {
+	getOllamaNumCtx,
 	getOllamaVisionCapability,
 	resetOllamaCapabilityCache,
 } from './ollama-capabilities';
@@ -154,6 +155,79 @@ test.serial('caches per model, not globally', async t => {
 		async baseUrl => {
 			t.is(await getOllamaVisionCapability(baseUrl, 'seer'), 'yes');
 			t.is(await getOllamaVisionCapability(baseUrl, 'blind'), 'no');
+		},
+	);
+});
+
+// --- getOllamaNumCtx ------------------------------------------------------
+
+/** Ollama returns the Modelfile parameter block as one text blob. */
+const PARAMETER_BLOCK = [
+	'top_k                          64',
+	'top_p                          0.95',
+	'num_ctx                        32768',
+	'num_predict                    -1',
+].join('\n');
+
+test.serial('reads the served num_ctx from the parameter block', async t => {
+	await withFakeOllama(
+		(_body, respond) => respond(200, {parameters: PARAMETER_BLOCK}),
+		async baseUrl => {
+			t.is(await getOllamaNumCtx(baseUrl, 'some-model'), 32768);
+		},
+	);
+});
+
+test.serial('ignores the architecture ceiling in favour of num_ctx', async t => {
+	await withFakeOllama(
+		(_body, respond) =>
+			respond(200, {
+				parameters: PARAMETER_BLOCK,
+				// Measured on a live server: the ceiling is far above what the tag
+				// is actually served with, and budgeting against it truncates.
+				model_info: {'gemma4.context_length': 262144},
+			}),
+		async baseUrl => {
+			t.is(await getOllamaNumCtx(baseUrl, 'some-model'), 32768);
+		},
+	);
+});
+
+test.serial('returns null when no num_ctx is baked in', async t => {
+	await withFakeOllama(
+		(_body, respond) => respond(200, {parameters: 'top_k    64'}),
+		async baseUrl => {
+			// Null, never a default: guessing here is the bug this prevents.
+			t.is(await getOllamaNumCtx(baseUrl, 'some-model'), null);
+		},
+	);
+});
+
+test.serial('returns null when the server has no parameter block', async t => {
+	await withFakeOllama(
+		(_body, respond) => respond(200, {capabilities: ['completion']}),
+		async baseUrl => {
+			t.is(await getOllamaNumCtx(baseUrl, 'some-model'), null);
+		},
+	);
+});
+
+test.serial('returns null when the server cannot be reached', async t => {
+	t.is(await getOllamaNumCtx('http://127.0.0.1:1/v1', 'm'), null);
+	t.is(await getOllamaNumCtx(undefined, 'm'), null);
+});
+
+test.serial('shares one request with the capability probe', async t => {
+	await withFakeOllama(
+		(_body, respond) =>
+			respond(200, {
+				capabilities: ['completion', 'vision'],
+				parameters: PARAMETER_BLOCK,
+			}),
+		async (baseUrl, requests) => {
+			t.is(await getOllamaVisionCapability(baseUrl, 'shared'), 'yes');
+			t.is(await getOllamaNumCtx(baseUrl, 'shared'), 32768);
+			t.is(requests.length, 1, 'both answers come from one /api/show call');
 		},
 	);
 });

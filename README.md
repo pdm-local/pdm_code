@@ -140,6 +140,11 @@ You can also set `contextWindow` per provider or `contextWindows` per model in
 `agents.config.json`. See
 [docs/configuration/providers/ollama.md](docs/configuration/providers/ollama.md).
 
+**Running the models on one machine and the agent on several?** That works,
+and the first run offers your other devices to pick from. See
+[Using a shared server on another device](docs/configuration/providers/ollama.md)
+for the one setting Ollama needs on the server.
+
 ### Other providers
 
 Any OpenAI-compatible endpoint works with the same block, plus an `apiKey`. Anthropic
