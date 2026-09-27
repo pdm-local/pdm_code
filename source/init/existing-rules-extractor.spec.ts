@@ -1,6 +1,6 @@
 import test from 'ava';
 import {existsSync, mkdirSync, rmSync, writeFileSync} from 'fs';
-import {join} from 'path';
+import {dirname, join} from 'path';
 import {tmpdir} from 'os';
 import {
 	type ExistingRules,
@@ -780,7 +780,9 @@ test('all AI config files are checked', t => {
 
 		for (const file of configFiles) {
 			const filePath = join(testDir, file);
-			const dir = filePath.substring(0, filePath.lastIndexOf('/'));
+			// dirname, not lastIndexOf('/'): join produces backslashes on Windows,
+			// so the slash search found nothing and the parent was never created.
+			const dir = dirname(filePath);
 			if (dir && dir !== testDir) {
 				mkdirSync(dir, {recursive: true});
 			}

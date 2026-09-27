@@ -15,6 +15,16 @@ import {
 	resolveFilePath,
 } from './path-validation';
 
+
+/**
+ * An absolute directory for the running platform. `/home/user/project` is not
+ * absolute on Windows: `path.resolve` prefixes it with the current drive, so
+ * asserting against `join(cwd, ...)` compared `D:\\home\\...` with
+ * `\\home\\...` and failed on a fixture rather than on behaviour.
+ */
+const FAKE_ROOT = process.platform === 'win32' ? 'C:\\project' : '/home/user/project';
+const FAKE_ALT_ROOT =
+	process.platform === 'win32' ? 'C:\\my-project' : '/home/user/my-project';
 // Test suite for isValidFilePath
 test('isValidFilePath: accepts simple relative paths', (t) => {
 	t.true(isValidFilePath('file.txt'));
@@ -90,19 +100,19 @@ test('isValidFilePath: accepts hidden files (starting with dot)', (t) => {
 
 // Test suite for resolveFilePath
 test('resolveFilePath: resolves simple relative paths', (t) => {
-	const cwd = '/home/user/project';
+	const cwd = FAKE_ROOT;
 	const result = resolveFilePath('src/app.tsx', cwd);
 	t.is(result, join(cwd, 'src/app.tsx'));
 });
 
 test('resolveFilePath: resolves nested paths', (t) => {
-	const cwd = '/home/user/project';
+	const cwd = FAKE_ROOT;
 	const result = resolveFilePath('src/components/Button.tsx', cwd);
 	t.is(result, join(cwd, 'src/components/Button.tsx'));
 });
 
 test('resolveFilePath: throws on invalid paths', (t) => {
-	const cwd = '/home/user/project';
+	const cwd = FAKE_ROOT;
 
 	t.throws(
 		() => resolveFilePath('../etc/passwd', cwd),
@@ -124,7 +134,7 @@ test('resolveFilePath: throws on invalid paths', (t) => {
 });
 
 test('resolveFilePath: prevents escape via path resolution', (t) => {
-	const cwd = '/home/user/project';
+	const cwd = FAKE_ROOT;
 
 	// Even though '../secret.txt' passes basic validation when considered alone,
 	// isValidFilePath will reject it because it contains '..'
@@ -135,7 +145,7 @@ test('resolveFilePath: prevents escape via path resolution', (t) => {
 });
 
 test('resolveFilePath: ensures resolved path stays within project', (t) => {
-	const cwd = '/home/user/project';
+	const cwd = FAKE_ROOT;
 
 	// Valid relative path
 	const result1 = resolveFilePath('src/file.txt', cwd);
@@ -147,13 +157,13 @@ test('resolveFilePath: ensures resolved path stays within project', (t) => {
 });
 
 test('resolveFilePath: handles different working directories', (t) => {
-	const cwdUnix = '/home/user/my-project';
+	const cwdUnix = FAKE_ALT_ROOT;
 	const result = resolveFilePath('src/index.ts', cwdUnix);
 	t.is(result, join(cwdUnix, 'src/index.ts'));
 });
 
 test('resolveFilePath: rejects null byte injection', (t) => {
-	const cwd = '/home/user/project';
+	const cwd = FAKE_ROOT;
 
 	t.throws(
 		() => resolveFilePath('file\0.txt', cwd),
@@ -162,13 +172,13 @@ test('resolveFilePath: rejects null byte injection', (t) => {
 });
 
 test('resolveFilePath: accepts hidden files', (t) => {
-	const cwd = '/home/user/project';
+	const cwd = FAKE_ROOT;
 	const result = resolveFilePath('.gitignore', cwd);
 	t.is(result, join(cwd, '.gitignore'));
 });
 
 test('resolveFilePath: accepts paths with special characters', (t) => {
-	const cwd = '/home/user/project';
+	const cwd = FAKE_ROOT;
 
 	const result1 = resolveFilePath('my-file.txt', cwd);
 	t.is(result1, join(cwd, 'my-file.txt'));
@@ -203,7 +213,7 @@ test('security: prevents null byte injection variations', (t) => {
 });
 
 test('security: ensures resolveFilePath maintains project boundaries', (t) => {
-	const cwd = '/home/user/project';
+	const cwd = FAKE_ROOT;
 
 	// All of these should throw because they're invalid
 	const attackVectors = [

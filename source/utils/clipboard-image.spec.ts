@@ -48,7 +48,16 @@ test('extractImagePathFromText resolves an existing image path', t => {
 	t.is(extractImagePathFromText(`file://${file}`), file);
 });
 
-test('extractImagePathFromText handles backslash-escaped spaces', t => {
+/**
+ * Backslash-escaped spaces are a POSIX shell convention: macOS and Linux
+ * terminals drop a dragged path in that form. On Windows a backslash is the
+ * path separator, so unescaping one would corrupt the path, and the function
+ * correctly leaves it alone. The behaviour is real, it just has no meaning
+ * there.
+ */
+const escapedSpaceTest = process.platform === 'win32' ? test.skip : test;
+
+escapedSpaceTest('extractImagePathFromText handles backslash-escaped spaces', t => {
 	const file = join(dir, 'my shot.png');
 	writeFileSync(file, PNG_BYTES);
 	// Shell-style escaping: escape backslashes first, then spaces, so a path
@@ -99,7 +108,7 @@ test('extractImageReferences pulls an unquoted path token out of prose', t => {
 	t.is(text, 'look at [Image #1] please');
 });
 
-test('extractImageReferences pulls an unquoted escaped-space path out of prose', t => {
+escapedSpaceTest('extractImageReferences pulls an unquoted escaped-space path out of prose', t => {
 	// macOS terminals drop dragged paths in unquoted with spaces backslash-escaped.
 	const file = join(dir, 'dragged shot.png');
 	writeFileSync(file, PNG_BYTES);

@@ -1,17 +1,47 @@
 import {createConnection} from 'node:net';
-import {mkdtemp, rm} from 'node:fs/promises';
+import {mkdir, mkdtemp, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
-import {join} from 'node:path';
+import {dirname, join} from 'node:path';
 import test from 'ava';
 import type {Subscription} from '@/events/types';
 import {DaemonIpcClient, DaemonIpcServer} from './ipc';
+import {resolveSocketPath} from './lockfile';
 
 console.log(`\nipc.spec.ts`);
 
+/**
+ * A listenable IPC endpoint for this platform.
+ *
+ * Deliberately the production resolver rather than a hand-built
+ * `<dir>/daemon.sock`: Windows cannot listen on a filesystem path at all, so a
+ * literal .sock path fails with EACCES there and the whole suite reported the
+ * daemon as broken when only the fixture was. The resolver returns a
+ * `\\.\pipe\` name on Windows and a socket file elsewhere, and the unique
+ * temp dir keeps each test in its own slot either way.
+ */
+const tempDirs: string[] = [];
+
 async function makeSocketPath(): Promise<string> {
 	const dir = await mkdtemp(join(tmpdir(), 'ipc-spec-'));
-	return join(dir, 'daemon.sock');
+	tempDirs.push(dir);
+	const endpoint = resolveSocketPath(dir, process.platform, tmpdir());
+	// A unix socket needs its directory to exist first, which the daemon does
+	// for itself before listening. A Windows pipe name lives in a global
+	// namespace and has no directory to create.
+	if (!endpoint.startsWith('\\\\.\\pipe\\')) {
+		await mkdir(dirname(endpoint), {recursive: true});
+	}
+	return endpoint;
 }
+
+// The endpoint is not always a file inside that directory (on Windows it is a
+// pipe name in a global namespace), so the directory is tracked and removed
+// here rather than derived from the endpoint path.
+test.after.always(async () => {
+	await Promise.all(
+		tempDirs.map(dir => rm(dir, {recursive: true, force: true})),
+	);
+});
 
 const SAMPLE_SUB: Subscription = {
 	id: 'sub-1',
@@ -35,7 +65,6 @@ test.serial('ping/pong round-trips through the socket', async t => {
 	} finally {
 		await client.disconnect();
 		await server.stop();
-		await rm(join(path, '..'), {recursive: true, force: true});
 	}
 });
 
@@ -66,7 +95,6 @@ test.serial('request rejects and releases the pending slot when write throws', a
 	} finally {
 		await client.disconnect();
 		await server.stop();
-		await rm(join(path, '..'), {recursive: true, force: true});
 	}
 });
 
@@ -90,7 +118,6 @@ test.serial('a closing socket rejects and drains every pending request', async t
 		t.is(internals.pending.size, 0);
 	} finally {
 		await server.stop();
-		await rm(join(path, '..'), {recursive: true, force: true});
 	}
 });
 
@@ -109,7 +136,6 @@ test.serial('listSubscriptions returns server-side list', async t => {
 	} finally {
 		await client.disconnect();
 		await server.stop();
-		await rm(join(path, '..'), {recursive: true, force: true});
 	}
 });
 
@@ -132,7 +158,6 @@ test.serial('unknown method returns an error response', async t => {
 	} finally {
 		await client.disconnect();
 		await server.stop();
-		await rm(join(path, '..'), {recursive: true, force: true});
 	}
 });
 
@@ -155,7 +180,6 @@ test.serial('invalid JSON returns {id:0, error:"invalid JSON"}', async t => {
 		sock.destroy();
 	} finally {
 		await server.stop();
-		await rm(join(path, '..'), {recursive: true, force: true});
 	}
 });
 
@@ -180,7 +204,6 @@ test.serial('shutdown method calls server-side handler', async t => {
 	} finally {
 		await client.disconnect();
 		await server.stop();
-		await rm(join(path, '..'), {recursive: true, force: true});
 	}
 });
 
@@ -201,7 +224,6 @@ test.serial(
 		} finally {
 			await client.disconnect();
 			await server.stop();
-			await rm(join(path, '..'), {recursive: true, force: true});
 		}
 	},
 );
@@ -241,7 +263,6 @@ test.serial(
 			}
 		} finally {
 			await server.stop();
-			await rm(join(path, '..'), {recursive: true, force: true});
 		}
 	},
 );

@@ -1,5 +1,5 @@
 import {readdirSync, statSync} from 'fs';
-import {basename, join, relative} from 'path';
+import {basename, join, relative, sep} from 'path';
 import {MAX_DIRECTORY_DEPTH, MAX_FILES_TO_SCAN} from '@/constants';
 import {loadGitignore} from '@/utils/gitignore-loader';
 
@@ -8,6 +8,18 @@ interface ScanResult {
 	directories: string[];
 	totalFiles: number;
 	scannedFiles: number;
+}
+
+/**
+ * Report paths with forward slashes on every platform.
+ *
+ * Not cosmetic: the `ignore` package implements gitignore semantics, which are
+ * defined over `/`, so handing it a Windows `src\\index.ts` silently matches
+ * nothing and .gitignore filtering stops working. Scan results are also
+ * compared and shown as text, so one separator everywhere keeps them stable.
+ */
+function toPosix(p: string): string {
+	return p.split(sep).join('/');
 }
 
 export class FileScanner {
@@ -23,7 +35,7 @@ export class FileScanner {
 	 * Check if a file/directory should be ignored based on .gitignore
 	 */
 	private shouldIgnore(filePath: string): boolean {
-		const relativePath = relative(this.rootPath, filePath);
+		const relativePath = toPosix(relative(this.rootPath, filePath));
 		// ignore library requires non-empty paths
 		if (!relativePath || relativePath === '.') {
 			return false;
@@ -72,7 +84,7 @@ export class FileScanner {
 
 				// nosemgrep
 				const fullPath = join(dirPath, entry); // nosemgrep
-				const relativePath = relative(this.rootPath, fullPath);
+				const relativePath = toPosix(relative(this.rootPath, fullPath));
 
 				if (this.shouldIgnore(fullPath)) {
 					continue;

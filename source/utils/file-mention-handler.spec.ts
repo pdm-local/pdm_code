@@ -1,6 +1,6 @@
 import {mkdir, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
-import {join} from 'node:path';
+import {isAbsolute, join} from 'node:path';
 import test from 'ava';
 import {type PlaceholderContent, PlaceholderType} from '../types/hooks.js';
 import {
@@ -213,7 +213,9 @@ test('stores absolute path in placeholder', async t => {
 	// Absolute path should be stored
 	t.is(placeholder.type, PlaceholderType.FILE);
 	if (placeholder.type === PlaceholderType.FILE) {
-		t.true(placeholder.filePath.startsWith('/'));
+		// isAbsolute, not a leading slash: an absolute Windows path starts with
+		// a drive letter.
+		t.true(isAbsolute(placeholder.filePath));
 		t.true(placeholder.filePath.includes('test.txt'));
 	}
 });

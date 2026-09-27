@@ -144,7 +144,14 @@ test('execute_bash returns output from ls command', async t => {
 	t.is(typeof result, 'string');
 });
 
-test('execute_bash handles command with pipes', async t => {
+/**
+ * `grep` and `"a\nb"` newline expansion are POSIX shell behaviour. On Windows
+ * the tool runs cmd.exe, which has pipes but neither of those, so this asserts
+ * a shell feature rather than anything the tool does.
+ */
+const posixShellTest = process.platform === 'win32' ? test.skip : test;
+
+posixShellTest('execute_bash handles command with pipes', async t => {
 	const result = await executeBashTool.tool.execute!(
 		{
 			command: 'echo "line1\nline2\nline3" | grep line2',
@@ -237,8 +244,10 @@ test('execute_bash handles syntax errors', async t => {
 test('execute_bash truncates long output to 2000 characters', async t => {
 	// Generate output longer than 2000 characters
 	// Use POSIX-compatible syntax (seq instead of bash brace expansion)
+	// node, not `seq | while read`: that is bash syntax and the tool runs cmd.exe
+	// on Windows. The truncation being tested is the tool's, not the shell's.
 	const longCommand =
-		'seq 1 100 | while read i; do echo "This is a long line of text that repeats many times"; done';
+		'node -e "for (let i = 0; i < 100; i++) console.log(\'This is a long line of text that repeats many times\')"';
 	const result = await executeBashTool.tool.execute!(
 		{command: longCommand},
 		{toolCallId: 'test', messages: []},

@@ -142,8 +142,11 @@ test('execute - coalesces progress events instead of emitting per chunk', async 
 
 	// 400 separate writes, which without coalescing produced an emit (and so a
 	// full Ink repaint) per chunk.
+	// Driven through node rather than a shell loop: `for ... $(seq ...)` is bash
+	// syntax and the executor runs cmd.exe on Windows. What matters here is many
+	// small writes, which this produces identically on either shell.
 	const {promise} = executor.execute(
-		'for i in $(seq 1 400); do echo "line $i"; done',
+		'node -e "for (let i = 1; i <= 400; i++) console.log(\'line \' + i)"',
 	);
 	const state = await promise;
 
@@ -453,7 +456,11 @@ test('output cap trips and appends the truncation marker exactly once', async t 
 
 	// We'll write more than BASH_MAX_OUTPUT_BYTES using python to avoid
 	// large bash allocations. This will emit slightly over the limit.
-	const { promise } = executor.execute(`python3 -c "print('A' * (${BASH_MAX_OUTPUT_BYTES} + 1000))"`);
+	// node, not python3: the Windows runner has `python`, not `python3`, and
+	// the quoting differs between shells.
+	const {promise} = executor.execute(
+		`node -e "process.stdout.write('A'.repeat(${BASH_MAX_OUTPUT_BYTES} + 1000))"`,
+	);
 	const result = await promise;
 
 	const truncationMarker = '... [Output truncated to prevent memory exhaustion]';
@@ -473,7 +480,14 @@ test('output cap trips and appends the truncation marker exactly once', async t 
 	);
 });
 
-test('cancel() on a detached process kills a spawned child (process-group assertion)', async t => {
+/**
+ * Process groups are a POSIX concept. bash-executor spawns detached and kills
+ * the group on Unix; on Windows it has no group to signal and falls back to
+ * terminating the child directly, and `&` / `$!` are not cmd.exe syntax either.
+ */
+const posixProcessTest = process.platform === 'win32' ? test.skip : test;
+
+posixProcessTest('cancel() on a detached process kills a spawned child (process-group assertion)', async t => {
 	const executor = createExecutor();
 	const { promise, executionId } = executor.execute('node -e "setInterval(() => {}, 1000)" & echo $!');
 

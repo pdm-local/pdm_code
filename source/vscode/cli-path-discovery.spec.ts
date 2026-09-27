@@ -66,7 +66,9 @@ test('buildFallbackCandidates includes pnpm Linux path', (t) => {
 	const origPnpmHome = process.env.PNPM_HOME;
 	try {
 		delete process.env.PNPM_HOME;
-		const candidates = buildFallbackCandidates('/home/testuser');
+		const candidates = withPlatform('linux', () =>
+			buildFallbackCandidates('/home/testuser'),
+		);
 		const hasPnpm =
 			candidates.some((c) => c.includes('.local/share/pnpm')) ||
 			candidates.some((c) => c.includes('Library/pnpm')); // macOS
@@ -80,7 +82,9 @@ test('buildFallbackCandidates uses PNPM_HOME when set', (t) => {
 	const origPnpmHome = process.env.PNPM_HOME;
 	try {
 		process.env.PNPM_HOME = '/custom/pnpm/bin';
-		const candidates = buildFallbackCandidates('/home/testuser');
+		const candidates = withPlatform('linux', () =>
+			buildFallbackCandidates('/home/testuser'),
+		);
 		t.true(
 			candidates.some((c) => c.startsWith('/custom/pnpm/bin')),
 			'Should use PNPM_HOME when set',
@@ -92,7 +96,9 @@ test('buildFallbackCandidates uses PNPM_HOME when set', (t) => {
 });
 
 test('buildFallbackCandidates includes bun path', (t) => {
-	const candidates = buildFallbackCandidates('/home/testuser');
+	const candidates = withPlatform('linux', () =>
+		buildFallbackCandidates('/home/testuser'),
+	);
 	t.true(
 		candidates.some((c) => c.includes('.bun/bin')),
 		'Should include ~/.bun/bin',
