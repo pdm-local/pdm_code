@@ -74,3 +74,38 @@ test.serial('alwaysAllow short-circuits approval for the listed tool', async t =
 		await rm(dir, {recursive: true, force: true});
 	}
 });
+
+test('protected paths prompt even in auto-accept and headless', t => {
+	const approval = createFileToolApproval('write_file');
+	for (const path of [
+		'.git/config',
+		'.git/hooks/pre-commit',
+		'sub/.GIT/config',
+		'.pdm/tools/x.md',
+		'.mcp.json',
+		'agents.config.json',
+		'pdm-preferences.json',
+		'.env',
+		'.env.local',
+	]) {
+		t.true(approval({path}, 'auto-accept'), path);
+		t.true(approval({path}, 'headless'), path);
+	}
+});
+
+test('file_op destination is checked as well as path', t => {
+	const approval = createFileToolApproval('file_op');
+	t.true(
+		approval(
+			{operation: 'copy', path: 'hook.sh', destination: '.git/hooks/pre-commit'},
+			'auto-accept',
+		),
+	);
+});
+
+test('ordinary paths keep the auto-accept behaviour', t => {
+	const approval = createFileToolApproval('write_file');
+	t.false(approval({path: 'src/git.ts'}, 'auto-accept'));
+	t.false(approval({path: 'docs/.environment.md'}, 'auto-accept'));
+	t.true(approval({path: 'src/git.ts'}, 'normal'));
+});

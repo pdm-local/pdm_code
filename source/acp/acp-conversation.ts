@@ -263,7 +263,11 @@ export async function runAcpConversation(
 		];
 		const cleanedContent = xmlParse.cleanedContent;
 
-		const partition = partitionUnknownToolCalls(allToolCalls, toolManager);
+		const partition = partitionUnknownToolCalls(
+			allToolCalls,
+			toolManager,
+			availableNames,
+		);
 		const {validToolCalls, errorResults} = partition;
 		const {emittedToolCalls, resultsForAbandonedTurn} =
 			buildAbandonedTurnMessages(partition);

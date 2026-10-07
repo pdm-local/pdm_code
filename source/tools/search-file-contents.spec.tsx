@@ -1,4 +1,10 @@
-import {mkdirSync, mkdtempSync, rmSync, writeFileSync} from 'node:fs';
+import {
+	mkdirSync,
+	mkdtempSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import test from 'ava';
@@ -2003,3 +2009,36 @@ test('SearchFileContentsFormatter hides context when 0', t => {
 	t.truthy(output);
 	t.notRegex(output!, /Context:/);
 });
+
+test.serial(
+	'search_file_contents does not follow symlinks out of the project',
+	async t => {
+		const root = mkdtempSync(join(tmpdir(), 'pdm-symlink-root-'));
+		const outside = mkdtempSync(join(tmpdir(), 'pdm-symlink-outside-'));
+		try {
+			writeFileSync(join(outside, 'secret.txt'), 'needle_marker secret');
+			writeFileSync(join(root, 'inproject.txt'), 'needle_marker here');
+			symlinkSync(join(outside, 'secret.txt'), join(root, 'link.txt'));
+			symlinkSync(outside, join(root, 'linkdir'));
+
+			setProjectRoot(root);
+			setSessionCwd(root);
+			const all = await searchFileContentsTool.tool.execute!(
+				{query: 'needle_marker', maxResults: 30},
+				{toolCallId: 'test', messages: []},
+			);
+			t.true(all.includes('inproject.txt'));
+			t.false(all.includes('secret'), 'symlinked file is not read');
+
+			const viaDir = await searchFileContentsTool.tool.execute!(
+				{query: 'needle_marker', path: 'linkdir', maxResults: 30},
+				{toolCallId: 'test', messages: []},
+			);
+			t.regex(viaDir, /escapes project directory/);
+		} finally {
+			resetSessionCwd();
+			rmSync(root, {recursive: true, force: true});
+			rmSync(outside, {recursive: true, force: true});
+		}
+	},
+);

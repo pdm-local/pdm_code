@@ -36,7 +36,8 @@ const executeGitAdd = async (args: GitAddInput): Promise<string> => {
 		} else if (args.update) {
 			gitArgs.push('-u');
 		} else if (args.files && args.files.length > 0) {
-			gitArgs.push(...args.files);
+			// `--` so a model-supplied `-f` or `--pathspec-from-file=` stays a path.
+			gitArgs.push('--', ...args.files);
 		} else {
 			// Default to staging all changes
 			gitArgs.push('-A');

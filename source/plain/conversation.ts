@@ -382,7 +382,11 @@ export async function runPlainConversation(
 		];
 		const cleanedContent = xmlParse.cleanedContent;
 
-		const partition = partitionUnknownToolCalls(allToolCalls, toolManager);
+		const partition = partitionUnknownToolCalls(
+			allToolCalls,
+			toolManager,
+			availableNames,
+		);
 		const {validToolCalls, unknownToolCalls, errorResults} = partition;
 		// errorResults is paired 1:1 with unknownToolCalls, in the same order.
 		for (const [index, toolCall] of unknownToolCalls.entries()) {

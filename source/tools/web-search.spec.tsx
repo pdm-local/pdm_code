@@ -161,14 +161,12 @@ test('web search tool has correct name', t => {
 	t.is(webSearchTool.name, 'web_search');
 });
 
-test('web search tool does not require approval', t => {
-	if (!webSearchTool) {
-		t.pass('Skipping test - web-search module not available');
-		return;
-	}
-
+test('web search tool prompts in normal and plan modes only', t => {
 	t.true(webSearchTool.readOnly);
-	t.is(webSearchTool.approval, undefined);
+	const approval = webSearchTool.approval as (a: unknown, m: string) => boolean;
+	t.true(approval({}, 'normal'));
+	t.true(approval({}, 'plan'));
+	t.false(approval({}, 'auto-accept'));
 });
 
 test('web search tool has description referencing Brave Search API', t => {

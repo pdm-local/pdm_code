@@ -21,7 +21,7 @@ function readUserPreferences(): UserPreferences {
 	}
 }
 
-export function getTrustedDirectories(): string[] {
+function getTrustedDirectories(): string[] {
 	const entries = readUserPreferences().trustedDirectories;
 	if (!Array.isArray(entries)) return [];
 	return entries

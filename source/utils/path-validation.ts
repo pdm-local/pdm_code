@@ -1,4 +1,4 @@
-import {existsSync, realpathSync} from 'node:fs';
+import {existsSync, lstatSync, realpathSync} from 'node:fs';
 import path from 'node:path';
 
 /**
@@ -226,11 +226,17 @@ export function isRealPathInside(target: string, root: string): boolean {
 function realResolvedPrefix(target: string): string {
 	let existing = target;
 	const tail: string[] = [];
-	while (!existsSync(existing)) {
+	// lstat, not existsSync: existsSync follows links, so a dangling symlink
+	// would read as a not-yet-created file and be appended lexically, and the
+	// write would then follow it to wherever it points.
+	while (!lexists(existing)) {
 		const parent = path.dirname(existing);
 		if (parent === existing) break; // reached the filesystem root
 		tail.unshift(path.basename(existing));
 		existing = parent;
+	}
+	if (!existsSync(existing)) {
+		throw new Error(`Path goes through a dangling symlink: ${existing}`);
 	}
 	let real: string;
 	try {
@@ -241,4 +247,13 @@ function realResolvedPrefix(target: string): string {
 		real = existing;
 	}
 	return tail.length > 0 ? path.join(real, ...tail) : real;
+}
+
+function lexists(target: string): boolean {
+	try {
+		lstatSync(target);
+		return true;
+	} catch {
+		return false;
+	}
 }

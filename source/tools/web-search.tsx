@@ -225,4 +225,7 @@ export const webSearchTool: PdmCodeToolExport = {
 	formatter: webSearchFormatter,
 	validator: webSearchValidator,
 	readOnly: true,
+	// The query leaves the machine, so it can carry whatever the model has
+	// read; same posture as fetch_url.
+	approval: (_args, mode) => mode === 'normal' || mode === 'plan',
 };

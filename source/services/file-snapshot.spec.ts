@@ -488,11 +488,29 @@ test.serial('FileSnapshotService refuses to restore outside the workspace', asyn
 		// corrupted index must not be able to write anywhere it likes.
 		await t.throwsAsync(
 			service.restoreFiles(new Map([['../escaped.txt', 'owned']])),
-			{message: /outside workspace/},
+			{message: /Invalid file path/},
 		);
 		t.false(existsSync(path.join(path.dirname(tempDir), 'escaped.txt')));
 	} finally {
 		await cleanupTempDir(tempDir);
+	}
+});
+
+test.serial('FileSnapshotService refuses to restore through a symlink out of the workspace', async t => {
+	const tempDir = await createTempDir();
+	const outside = await createTempDir();
+	try {
+		// A repo can ship both the checkpoint and `link -> ~/.ssh`.
+		await fs.symlink(outside, path.join(tempDir, 'link'));
+		const service = new FileSnapshotService(tempDir);
+		await t.throwsAsync(
+			service.restoreFiles(new Map([['link/authorized_keys', 'owned']])),
+			{message: /via symlink/},
+		);
+		t.false(existsSync(path.join(outside, 'authorized_keys')));
+	} finally {
+		await cleanupTempDir(tempDir);
+		await cleanupTempDir(outside);
 	}
 });
 

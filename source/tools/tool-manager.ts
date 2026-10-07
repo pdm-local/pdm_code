@@ -174,6 +174,31 @@ export class ToolManager {
 	// =========================================================================
 
 	/**
+	 * Whether `developmentMode` permits `name` at all, independent of profile
+	 * or disable list. Also checked at execution time, not only when choosing
+	 * what to offer: a model can still name a tool it was not offered (text
+	 * tool calls are parsed out of plain content), and plan mode must not run
+	 * a mutating tool just because the model asked for it.
+	 */
+	isAllowedInMode(name: string, developmentMode: DevelopmentMode): boolean {
+		if (MODE_EXCLUDED_TOOLS[developmentMode].includes(name)) return false;
+
+		// Custom tools follow the same posture as built-ins but with policy
+		// applied per-tool from their approval/readOnly metadata.
+		if (developmentMode === 'plan' || developmentMode === 'headless') {
+			const meta = this.customTools.get(name);
+			if (!meta) return true;
+			if (developmentMode === 'headless') {
+				return meta.approval === 'never';
+			}
+			// plan mode: only read-only tools with no approval are safe
+			return meta.approval === 'never' && meta.readOnly;
+		}
+
+		return true;
+	}
+
+	/**
 	 * Get the list of tool names available given the current mode and tune config.
 	 * This is the single authority used by both prompt building and runtime.
 	 */
@@ -211,25 +236,7 @@ export class ToolManager {
 
 		// Apply mode-based exclusions
 		if (developmentMode) {
-			const excluded = MODE_EXCLUDED_TOOLS[developmentMode];
-			if (excluded.length > 0) {
-				const excludeSet = new Set(excluded);
-				names = names.filter(n => !excludeSet.has(n));
-			}
-
-			// Custom tools follow the same posture as built-ins but with policy
-			// applied per-tool from their approval/readOnly metadata.
-			if (developmentMode === 'plan' || developmentMode === 'headless') {
-				names = names.filter(n => {
-					const meta = this.customTools.get(n);
-					if (!meta) return true;
-					if (developmentMode === 'headless') {
-						return meta.approval === 'never';
-					}
-					// plan mode: only read-only tools with no approval are safe
-					return meta.approval === 'never' && meta.readOnly;
-				});
-			}
+			names = names.filter(n => this.isAllowedInMode(n, developmentMode));
 		}
 
 		// Apply user-configured disable list (intersects with profile + mode).

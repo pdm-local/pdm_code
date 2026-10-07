@@ -352,6 +352,8 @@ Brave's free tier includes 2,000 queries per month. [Get an API key here](https:
 
 The `apiKey` field supports environment variable substitution (`$VAR`, `${VAR}`, `${VAR:-default}`), so you can keep the actual key in your environment rather than in the config file.
 
+`web_search` and `fetch_url` ask for approval in normal and plan modes. Both are read-only, but the request itself leaves your machine and can carry anything the model has read, so they don't run silently where you review each step. `fetch_url` also refuses loopback, private, link-local and cloud-metadata addresses, checked on the resolved IP for every redirect hop.
+
 ## Ignoring Files
 
 PDM Code already respects your `.gitignore`, so `node_modules`, `dist` and friends stay out of the way. But some files are tracked in git and still not worth spending context on: lockfiles, generated fixtures, vendored bundles, big snapshot files.

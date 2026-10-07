@@ -1,3 +1,4 @@
+import {existsSync} from 'node:fs';
 import path from 'node:path';
 import {Box, Text} from 'ink';
 import React from 'react';
@@ -13,7 +14,11 @@ import type {PdmCodeToolExport} from '@/types/core';
 import {jsonSchema, tool} from '@/types/core';
 import {formatError} from '@/utils/error-formatter';
 import {searchProjectContents} from '@/utils/file-search';
-import {isPathInside, isValidFilePath} from '@/utils/path-validation';
+import {
+	isPathInside,
+	isRealPathInside,
+	isValidFilePath,
+} from '@/utils/path-validation';
 import {calculateTokens} from '@/utils/token-calculator';
 
 const MAX_CONTEXT_LINES = 10;
@@ -54,7 +59,12 @@ const executeSearchFileContents = async (
 			return `Error: Invalid path "${args.path}"`;
 		}
 		searchPath = path.resolve(cwd, args.path);
-		if (!isPathInside(searchPath, root)) {
+		// Symlink-aware: `link-to-home/.ssh` is lexically inside the project. A
+		// missing path is left to the walk, which reports it as not found.
+		const contained = existsSync(searchPath)
+			? isRealPathInside(searchPath, root)
+			: isPathInside(searchPath, root);
+		if (!contained) {
 			return `Error: Path escapes project directory: ${args.path}`;
 		}
 	}

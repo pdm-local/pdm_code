@@ -255,6 +255,23 @@ test.serial('security: rejects an in-project symlink whose target escapes', t =>
 	}
 });
 
+test.serial('security: rejects a dangling symlink to a missing outside file', t => {
+	const base = mkdtempSync(join(tmpdir(), 'pathval-'));
+	try {
+		const project = join(base, 'project');
+		mkdirSync(project);
+		// Target does not exist yet: existsSync(link) is false, so the old
+		// walk took the link for a new file and let the write follow it.
+		symlinkSync(join(base, 'outside', 'authorized_keys'), join(project, 'notes.md'));
+
+		t.throws(() => resolveFilePath('notes.md', project), {
+			message: /dangling symlink/,
+		});
+	} finally {
+		rmSync(base, {recursive: true, force: true});
+	}
+});
+
 test.serial('security: allows an in-project symlink that stays inside', t => {
 	const base = mkdtempSync(join(tmpdir(), 'pathval-'));
 	try {

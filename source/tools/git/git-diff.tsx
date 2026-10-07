@@ -41,7 +41,9 @@ function buildGitDiffArgs(
 	}
 
 	if (args.base) {
-		gitArgs.push(args.base);
+		// The model picks `base`; without this a value like `--output=~/.bashrc`
+		// is parsed as an option and overwrites any file, with no prompt.
+		gitArgs.push('--end-of-options', args.base);
 	}
 
 	if (args.file) {

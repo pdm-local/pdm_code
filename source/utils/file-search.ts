@@ -4,6 +4,7 @@ import path from 'node:path';
 
 import {BINARY_FILE_EXTENSIONS} from '@/constants';
 import {loadGitignore} from '@/utils/gitignore-loader';
+import {isRealPathInside} from '@/utils/path-validation';
 
 const MAX_CONTEXT_CONTENT_LENGTH = 1500;
 const MAX_MATCH_CONTENT_LENGTH = 300;
@@ -27,6 +28,7 @@ export interface ProjectEntry {
 	absolutePath: string;
 	relativePath: string;
 	isDirectory: boolean;
+	isSymlink: boolean;
 }
 
 export interface SearchMatch {
@@ -212,6 +214,7 @@ export async function walkProjectEntries(
 				absolutePath,
 				relativePath,
 				isDirectory,
+				isSymlink,
 			});
 			if (shouldStop) {
 				return true;
@@ -297,6 +300,12 @@ export async function searchProjectContents(
 			searchPath,
 			async entry => {
 				if (entry.isDirectory) {
+					return false;
+				}
+
+				// readFile follows links, so an in-repo `x -> ~/.aws/credentials`
+				// would be searched and its lines returned to the model.
+				if (entry.isSymlink && !isRealPathInside(entry.absolutePath, cwd)) {
 					return false;
 				}
 

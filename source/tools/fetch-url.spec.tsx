@@ -230,13 +230,12 @@ test('tool has correct name', t => {
 	t.is(fetchUrlTool.name, 'fetch_url');
 });
 
-test('tool does not require confirmation', t => {
-	if (!fetchUrlTool) {
-		t.pass('Skipping test - fetch-url module not available');
-		return;
-	}
+test('tool prompts in normal and plan modes only', t => {
 	t.true(fetchUrlTool.readOnly);
-	t.is(fetchUrlTool.approval, undefined);
+	const approval = fetchUrlTool.approval as (a: unknown, m: string) => boolean;
+	t.true(approval({}, 'normal'));
+	t.true(approval({}, 'plan'));
+	t.false(approval({}, 'auto-accept'));
 });
 
 test('formatter is a function', t => {

@@ -104,8 +104,26 @@ const createMockClient = (
 	return {client, callCount: 0};
 };
 
+// Every tool these specs call. Calls outside the offered list are refused
+// before execution, so the mock must offer what the tests actually use.
+const OFFERED_TOOLS = [
+	'read_file',
+	'write_file',
+	'execute_bash',
+	'dangerous_tool',
+	'safe_tool',
+	'slow_tool',
+	'some_tool',
+	'failing_tool',
+	'queued_tool',
+	'write_plan',
+	'write_tasks',
+	'write_walkthrough',
+	'ask_user',
+];
+
 const createMockToolManager = () => ({
-	getAvailableToolNames: () => ['read_file'],
+	getAvailableToolNames: () => OFFERED_TOOLS,
 	getFilteredTools: () => ({}),
 	hasTool: (_name: string) => false,
 	getToolEntry: () => ({approval: false}),

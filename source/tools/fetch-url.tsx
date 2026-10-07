@@ -2,15 +2,70 @@
 // readability, domutils, entities) is loaded lazily inside the handler, // only users who actually invoke `fetch_url` pay the cost.
 import {Box, Text} from 'ink';
 import React from 'react';
+import {fetch as undiciFetch} from 'undici';
 import {DEFAULT_TERMINAL_COLUMNS, MAX_URL_CONTENT_BYTES} from '@/constants';
 import {useTheme} from '@/hooks/useTheme';
 import type {PdmCodeToolExport} from '@/types/core';
 import {jsonSchema, tool} from '@/types/core';
 import {formatError} from '@/utils/error-formatter';
+import {assertPublicHttpUrl, publicOnlyAgent} from '@/utils/network-guard';
 import {calculateTokens} from '@/utils/token-calculator';
 
 interface FetchArgs {
 	url: string;
+}
+
+const MAX_REDIRECTS = 5;
+// Raw response cap, before markdown conversion (get-md's own default).
+const MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
+
+/**
+ * Fetch `url` through the public-only dispatcher, following redirects by hand
+ * so every hop is re-validated: a public page answering 302 to the metadata
+ * endpoint is refused like a direct request would be.
+ */
+async function fetchPublicPage(
+	url: string,
+): Promise<{body: string; contentType: string}> {
+	let current = new URL(url);
+	for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+		assertPublicHttpUrl(current);
+		const response = await undiciFetch(current, {
+			dispatcher: publicOnlyAgent,
+			redirect: 'manual',
+			signal: AbortSignal.timeout(30_000),
+			headers: {
+				Accept:
+					'text/html,application/xhtml+xml,text/plain,text/markdown;q=0.9,*/*;q=0.5',
+			},
+		});
+
+		const location = response.headers.get('location');
+		if (response.status >= 300 && response.status < 400 && location) {
+			await response.body?.cancel();
+			current = new URL(location, current);
+			continue;
+		}
+		if (!response.ok) {
+			await response.body?.cancel();
+			throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+		}
+
+		const declared = Number(response.headers.get('content-length') ?? 0);
+		if (declared > MAX_RESPONSE_BYTES) {
+			await response.body?.cancel();
+			throw new Error(`Response too large (${declared} bytes)`);
+		}
+		const buffer = await response.arrayBuffer();
+		if (buffer.byteLength > MAX_RESPONSE_BYTES) {
+			throw new Error(`Response too large (${buffer.byteLength} bytes)`);
+		}
+		return {
+			body: new TextDecoder('utf-8').decode(buffer),
+			contentType: response.headers.get('content-type') ?? '',
+		};
+	}
+	throw new Error(`Too many redirects (more than ${MAX_REDIRECTS})`);
 }
 
 const executeFetchUrl = async (args: FetchArgs): Promise<string> => {
@@ -22,13 +77,21 @@ const executeFetchUrl = async (args: FetchArgs): Promise<string> => {
 	}
 
 	try {
-		// Use get-md to convert URL to LLM-friendly markdown (lazy import
-		// so the ~100-module HTML-parsing graph only loads when the tool
-		// actually runs).
-		const {convertToMarkdown} = await import('@nanocollective/get-md');
-		const result = await convertToMarkdown(args.url);
+		const {body, contentType} = await fetchPublicPage(args.url);
 
-		const content = result.markdown;
+		let content: string;
+		if (/html|xml/i.test(contentType) || contentType === '') {
+			// Use get-md to convert HTML to LLM-friendly markdown (lazy import
+			// so the ~100-module HTML-parsing graph only loads when the tool
+			// actually runs). It gets the body, never the URL, so it can't make
+			// an unguarded request of its own.
+			const {convertToMarkdown} = await import('@nanocollective/get-md');
+			content = (await convertToMarkdown(body, {isUrl: false})).markdown;
+		} else if (/^text\/|json/i.test(contentType)) {
+			content = body;
+		} else {
+			throw new Error(`Unsupported content type: ${contentType}`);
+		}
 
 		if (!content || content.length === 0) {
 			throw new Error('No content returned from URL');
@@ -134,46 +197,21 @@ const fetchUrlFormatter = (
 const fetchUrlValidator = (
 	args: FetchArgs,
 ): Promise<{valid: true} | {valid: false; error: string}> => {
-	// Validate URL format
+	let parsedUrl: URL;
 	try {
-		const parsedUrl = new URL(args.url);
-
-		// Check for valid protocol
-		if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
-			return Promise.resolve({
-				valid: false,
-				error: `Invalid URL protocol "${parsedUrl.protocol}". Only http: and https: are supported.`,
-			});
-		}
-
-		// Check for localhost/internal IPs (security consideration)
-		const hostname = parsedUrl.hostname.toLowerCase();
-		if (
-			hostname === 'localhost' ||
-			hostname === '127.0.0.1' ||
-			hostname === '0.0.0.0' ||
-			// IPv6 loopback/unspecified. The URL parser normalizes every spelling
-			// (`[::1]`, expanded, IPv4-mapped `[::ffff:127.0.0.1]`) to these forms.
-			hostname === '[::1]' ||
-			hostname === '[::ffff:7f00:1]' ||
-			hostname === '[::]' ||
-			hostname.startsWith('192.168.') ||
-			hostname.startsWith('10.') ||
-			hostname.match(/^172\.(1[6-9]|2[0-9]|3[0-1])\./)
-		) {
-			return Promise.resolve({
-				valid: false,
-				error: `Cannot fetch from internal/private network address: ${hostname}`,
-			});
-		}
-
-		return Promise.resolve({valid: true});
+		parsedUrl = new URL(args.url);
 	} catch {
 		return Promise.resolve({
 			valid: false,
 			error: `Invalid URL format: ${args.url}`,
 		});
 	}
+	try {
+		assertPublicHttpUrl(parsedUrl);
+	} catch (error) {
+		return Promise.resolve({valid: false, error: formatError(error)});
+	}
+	return Promise.resolve({valid: true});
 };
 
 export const fetchUrlTool: PdmCodeToolExport = {
@@ -182,4 +220,8 @@ export const fetchUrlTool: PdmCodeToolExport = {
 	formatter: fetchUrlFormatter,
 	validator: fetchUrlValidator,
 	readOnly: true,
+	// Read-only, but outbound: the URL can carry anything the model has read
+	// (e.g. `?d=<secrets>` after a prompt injection), so it is not silent in
+	// the modes where the user reviews each step.
+	approval: (_args, mode) => mode === 'normal' || mode === 'plan',
 };

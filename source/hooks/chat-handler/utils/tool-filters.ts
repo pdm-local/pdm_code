@@ -35,6 +35,7 @@ const partitionToolCalls = (
 	toolCalls: ToolCall[],
 	toolManager: ToolManager | null,
 	describeUnknown: (toolCall: ToolCall) => ToolResult,
+	offeredNames?: readonly string[],
 ): PartitionedToolCalls => {
 	const validToolCalls: ToolCall[] = [];
 	const unknownToolCalls: ToolCall[] = [];
@@ -47,9 +48,12 @@ const partitionToolCalls = (
 			continue;
 		}
 
+		// A registered tool the model was not offered this turn (mode, profile,
+		// disabledTools) is treated as unknown, so naming it can't run it.
 		const isUnknown =
 			toolCall.function.name === XML_VALIDATION_ERROR_TOOL ||
-			(!!toolManager && !toolManager.hasTool(toolCall.function.name));
+			(!!toolManager && !toolManager.hasTool(toolCall.function.name)) ||
+			(!!offeredNames && !offeredNames.includes(toolCall.function.name));
 
 		if (isUnknown) {
 			unknownToolCalls.push(toolCall);
@@ -66,22 +70,28 @@ const partitionToolCalls = (
 export const filterValidToolCalls = (
 	toolCalls: ToolCall[],
 	toolManager: ToolManager | null,
+	offeredNames?: readonly string[],
 ): PartitionedToolCalls =>
-	partitionToolCalls(toolCalls, toolManager, toolCall => {
-		// Listing the valid tool names gives small models a concrete recovery
-		// target instead of leaving them to re-guess the same wrong name.
-		const available = toolManager?.getToolNames?.() ?? [];
-		const availableHint =
-			available.length > 0
-				? ` Available tools are: ${available.join(', ')}.`
-				: '';
-		return {
-			tool_call_id: toolCall.id,
-			role: 'tool' as const,
-			name: toolCall.function.name,
-			content: `The tool "${toolCall.function.name}" does not exist. Use only the tools that are available in the system.${availableHint}`,
-		};
-	});
+	partitionToolCalls(
+		toolCalls,
+		toolManager,
+		toolCall => {
+			// Listing the valid tool names gives small models a concrete recovery
+			// target instead of leaving them to re-guess the same wrong name.
+			const available = offeredNames ?? toolManager?.getToolNames?.() ?? [];
+			const availableHint =
+				available.length > 0
+					? ` Available tools are: ${available.join(', ')}.`
+					: '';
+			return {
+				tool_call_id: toolCall.id,
+				role: 'tool' as const,
+				name: toolCall.function.name,
+				content: `The tool "${toolCall.function.name}" does not exist. Use only the tools that are available in the system.${availableHint}`,
+			};
+		},
+		offeredNames,
+	);
 
 /**
  * Same partition as `filterValidToolCalls`, with the compact
@@ -91,14 +101,20 @@ export const filterValidToolCalls = (
 export const partitionUnknownToolCalls = (
 	toolCalls: ToolCall[],
 	toolManager: ToolManager,
+	offeredNames?: readonly string[],
 ): PartitionedToolCalls =>
-	partitionToolCalls(toolCalls, toolManager, toolCall => ({
-		tool_call_id: toolCall.id,
-		role: 'tool' as const,
-		name: toolCall.function.name,
-		content: `Unknown tool: ${toolCall.function.name}`,
-		isError: true,
-	}));
+	partitionToolCalls(
+		toolCalls,
+		toolManager,
+		toolCall => ({
+			tool_call_id: toolCall.id,
+			role: 'tool' as const,
+			name: toolCall.function.name,
+			content: `Unknown tool: ${toolCall.function.name}`,
+			isError: true,
+		}),
+		offeredNames,
+	);
 
 /**
  * Builds the message payload for a turn that carried an unknown tool call.

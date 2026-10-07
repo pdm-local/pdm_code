@@ -158,15 +158,23 @@ for (const mode of ['normal', 'auto-accept', 'plan'] as const) {
 		);
 	});
 
-	test(`web_search never requires approval in ${mode} mode`, async t => {
-		t.false(await evaluateNeedsApproval(webSearchTool, mode, {query: 'test'}));
+	// Outbound tools: the request itself can carry data off the machine, so
+	// they prompt wherever the user reviews each step.
+	const outboundPrompts = mode !== 'auto-accept';
+
+	test(`web_search approval in ${mode} mode is ${outboundPrompts}`, async t => {
+		t.is(
+			await evaluateNeedsApproval(webSearchTool, mode, {query: 'test'}),
+			outboundPrompts,
+		);
 	});
 
-	test(`fetch_url never requires approval in ${mode} mode`, async t => {
-		t.false(
+	test(`fetch_url approval in ${mode} mode is ${outboundPrompts}`, async t => {
+		t.is(
 			await evaluateNeedsApproval(fetchUrlTool, mode, {
 				url: 'https://example.com',
 			}),
+			outboundPrompts,
 		);
 	});
 

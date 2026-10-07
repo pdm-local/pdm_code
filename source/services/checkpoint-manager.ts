@@ -224,6 +224,9 @@ export class CheckpointManager {
 			for (const relativePath of metadata.filesChanged) {
 				try {
 					const filePath = path.join(filesDir, relativePath); // nosemgrep
+					// filesChanged comes from metadata on disk; `../` must not read
+					// arbitrary files into the restore set.
+					if (!isPathInside(filePath, filesDir)) continue;
 					const content = await fs.readFile(filePath, 'utf-8');
 					fileSnapshots.set(relativePath, content);
 				} catch (error) {

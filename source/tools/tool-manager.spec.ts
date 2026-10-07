@@ -1120,3 +1120,12 @@ test('plan mode still exposes write_plan under a slim profile', t => {
 			.includes('write_plan'),
 	);
 });
+
+test('isAllowedInMode - plan refuses mutators, allows readers', t => {
+	const manager = new ToolManager();
+	t.false(manager.isAllowedInMode('git_add', 'plan'));
+	t.false(manager.isAllowedInMode('write_file', 'plan'));
+	t.false(manager.isAllowedInMode('execute_bash', 'plan'));
+	t.true(manager.isAllowedInMode('read_file', 'plan'));
+	t.true(manager.isAllowedInMode('git_add', 'normal'));
+});

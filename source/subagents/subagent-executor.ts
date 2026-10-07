@@ -281,6 +281,13 @@ export class SubagentExecutor {
 			available = available.filter(name => !disabledSet.has(name));
 		}
 
+		// The parent's live mode binds subagents too: plan mode must not hand a
+		// subagent the mutating tools it withholds from the main loop.
+		const mode = this.currentMode();
+		available = available.filter(name =>
+			this.toolManager.isAllowedInMode(name, mode),
+		);
+
 		// Always exclude agent tool to prevent infinite recursion
 		available = available.filter(name => name !== 'agent');
 

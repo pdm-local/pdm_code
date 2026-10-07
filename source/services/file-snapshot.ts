@@ -6,7 +6,7 @@ import {MAX_CHECKPOINT_FILES} from '@/constants';
 import {formatError} from '@/utils/error-formatter';
 import {loadGitignore} from '@/utils/gitignore-loader';
 import {logWarning} from '@/utils/message-queue';
-import {isPathInside} from '@/utils/path-validation';
+import {resolveFilePath} from '@/utils/path-validation';
 
 /**
  * Service for capturing and restoring file snapshots for checkpoints
@@ -52,15 +52,11 @@ export class FileSnapshotService {
 
 		for (const [relativePath, content] of snapshots) {
 			try {
-				const absolutePath = path.resolve(this.workspaceRoot, relativePath); // nosemgrep
 				// Snapshot keys are read back from user-writable metadata on disk
 				// (checkpoint / timeline index files), so a corrupted or tampered
-				// index must not be able to write outside the workspace.
-				if (!isPathInside(absolutePath, this.workspaceRoot)) {
-					throw new Error(
-						`Refusing to restore path outside workspace: ${relativePath}`,
-					);
-				}
+				// index must not be able to write outside the workspace, including
+				// through a symlink the repo ships (`link -> ~/.ssh`).
+				const absolutePath = resolveFilePath(relativePath, this.workspaceRoot);
 				const directory = path.dirname(absolutePath);
 
 				await fs.mkdir(directory, {recursive: true});
@@ -177,12 +173,7 @@ export class FileSnapshotService {
 	 * Delete a file inside the workspace. Refuses paths that escape the root.
 	 */
 	async deleteFile(relativePath: string): Promise<void> {
-		const absolutePath = path.resolve(this.workspaceRoot, relativePath); // nosemgrep
-		if (!isPathInside(absolutePath, this.workspaceRoot)) {
-			throw new Error(
-				`Refusing to delete path outside workspace: ${relativePath}`,
-			);
-		}
+		const absolutePath = resolveFilePath(relativePath, this.workspaceRoot);
 		if (existsSync(absolutePath)) {
 			await fs.unlink(absolutePath);
 		}

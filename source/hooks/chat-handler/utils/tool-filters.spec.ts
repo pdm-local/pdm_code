@@ -214,3 +214,28 @@ test('buildAbandonedTurnMessages - a clean turn produces no abandoned results', 
 	t.is(emittedToolCalls.length, 1);
 	t.is(resultsForAbandonedTurn.length, 0);
 });
+
+test('filterValidToolCalls - a registered tool not offered this turn is refused', t => {
+	const toolCalls: ToolCall[] = [
+		{id: 'call_1', function: {name: 'git_add', arguments: {}}},
+		{id: 'call_2', function: {name: 'read_file', arguments: {}}},
+	];
+	const mockToolManager = {
+		hasTool: () => true,
+		getToolNames: () => ['git_add', 'read_file'],
+	} as unknown as ToolManager;
+
+	const {validToolCalls, errorResults} = filterValidToolCalls(
+		toolCalls,
+		mockToolManager,
+		['read_file'],
+	);
+
+	t.deepEqual(
+		validToolCalls.map(call => call.function.name),
+		['read_file'],
+	);
+	t.is(errorResults.length, 1);
+	t.is(errorResults[0].name, 'git_add');
+	t.false(errorResults[0].content.includes('git_add,'));
+});

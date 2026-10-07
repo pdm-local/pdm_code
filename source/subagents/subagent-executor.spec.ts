@@ -57,6 +57,8 @@ function createMockToolManager(
 			};
 		},
 		isReadOnly: (name: string) => tools[name]?.readOnly ?? false,
+		isAllowedInMode: (name: string, mode: string) =>
+			!(mode === 'plan' && !tools[name]?.readOnly),
 		getToolFormatter: () => undefined,
 		getStreamingFormatter: () => undefined,
 	} as unknown as ToolManager;
@@ -1284,3 +1286,33 @@ test.serial('compacts subagent history after a tool turn', async t => {
 	}
 });
 
+
+test.serial('plan mode withholds mutating tools from a subagent', async t => {
+	// git_status is on explore's allow-list; marking it a mutator lets the
+	// mock's plan-mode rule stand in for ToolManager.isAllowedInMode.
+	let ran = false;
+	const toolManager = createMockToolManager({
+		git_status: {
+			handler: async () => {
+				ran = true;
+				return 'clean';
+			},
+			readOnly: false,
+		},
+	});
+	const client = createMockClient([
+		{
+			content: '',
+			tool_calls: [
+				{id: 'tc1', function: {name: 'git_status', arguments: '{}'}},
+			],
+		},
+		{content: 'Done'},
+	]);
+
+	const executor = new SubagentExecutor(toolManager, client);
+	executor.setParentMode('plan');
+	await executor.execute({subagent_type: 'explore', description: 'Plan run'});
+
+	t.false(ran);
+});

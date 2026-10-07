@@ -3,7 +3,7 @@
  */
 
 import {execSync} from 'node:child_process';
-import {mkdtempSync, rmSync, writeFileSync} from 'node:fs';
+import {mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import React from 'react';
@@ -236,4 +236,33 @@ test('git_diff formatter shows file stats', t => {
 	t.regex(output!, /3 files/);
 	t.regex(output!, /\+10/);
 	t.regex(output!, /-5/);
+});
+
+test.serial('git_diff treats an option-like base as a revision, not a flag', async t => {
+	const dir = mkdtempSync(join(tmpdir(), 'pdm-git-diff-test-'));
+	const originalCwd = process.cwd();
+	const victim = join(dir, 'victim.txt');
+
+	try {
+		execSync('git init -q -b main', {cwd: dir});
+		execSync('git config user.email test@example.com', {cwd: dir});
+		execSync('git config user.name Test', {cwd: dir});
+		writeFileSync(join(dir, 'a.txt'), 'one\n');
+		execSync('git add a.txt', {cwd: dir});
+		execSync('git commit -q -m one', {cwd: dir});
+		writeFileSync(join(dir, 'a.txt'), 'two\n');
+		writeFileSync(victim, 'keep me\n');
+
+		process.chdir(dir);
+		// biome-ignore lint/suspicious/noExplicitAny: Test accesses the AI SDK execute function.
+		const execute = (gitDiffTool.tool as any).execute as (args: {
+			base?: string;
+		}) => Promise<string>;
+		await execute({base: `--output=${victim}`}).catch(() => undefined);
+
+		t.is(readFileSync(victim, 'utf-8'), 'keep me\n');
+	} finally {
+		process.chdir(originalCwd);
+		rmSync(dir, {recursive: true, force: true});
+	}
 });
