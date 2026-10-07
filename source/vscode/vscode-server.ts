@@ -3,12 +3,18 @@
  */
 
 import {readFile} from 'node:fs/promises';
-import {randomUUID} from 'crypto';
+import type {IncomingMessage} from 'node:http';
+import {randomBytes, randomUUID, timingSafeEqual} from 'crypto';
 import {WebSocket, WebSocketServer} from 'ws';
 import {BoundedMap} from '@/utils/bounded-map';
 import {formatError} from '@/utils/error-formatter';
 import {getLogger} from '@/utils/logging';
 import {getShutdownManager} from '@/utils/shutdown';
+import {
+	removeVSCodeToken,
+	VSCODE_TOKEN_HEADER,
+	writeVSCodeToken,
+} from './auth-token';
 import {
 	AssistantMessage,
 	ClientMessage,
@@ -92,8 +98,25 @@ export class VSCodeServer {
 	private currentModel?: string;
 	private currentProvider?: string;
 	private cliVersion: string = '0.0.0';
+	private readonly token = randomBytes(32).toString('hex');
 
 	constructor(private port: number = DEFAULT_PORT) {}
+
+	/**
+	 * Accept only the extension. A browser always sends Origin (the extension's
+	 * Node client never does) and cannot set the token header; another local
+	 * user cannot read the 0600 token file.
+	 */
+	private isAuthorized(request: IncomingMessage): boolean {
+		if (request.headers.origin !== undefined) return false;
+		const presented = request.headers[VSCODE_TOKEN_HEADER];
+		if (typeof presented !== 'string') return false;
+		const expected = Buffer.from(this.token);
+		const actual = Buffer.from(presented);
+		return (
+			actual.length === expected.length && timingSafeEqual(actual, expected)
+		);
+	}
 
 	/**
 	 * Get the actual port the server is listening on
@@ -111,11 +134,14 @@ export class VSCodeServer {
 				const wss = new WebSocketServer({
 					port,
 					host: '127.0.0.1', // Only accept local connections
+					verifyClient: ({req}: {req: IncomingMessage}) =>
+						this.isAuthorized(req),
 				});
 
 				wss.on('listening', () => {
 					this.wss = wss;
 					this.port = port;
+					writeVSCodeToken(port, this.token);
 
 					this.wss.on('connection', ws => {
 						this.handleConnection(ws);
@@ -188,6 +214,8 @@ export class VSCodeServer {
 			client.close();
 		}
 		this.clients.clear();
+
+		if (this.wss) removeVSCodeToken(this.port);
 
 		// Close server
 		return new Promise(resolve => {

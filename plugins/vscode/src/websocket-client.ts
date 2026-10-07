@@ -7,6 +7,10 @@ import {
 	DEFAULT_PORT,
 } from './protocol';
 import {TIMEOUT_PROVIDER_CONNECTION_MS} from '../../../source/constants';
+import {
+	readVSCodeToken,
+	VSCODE_TOKEN_HEADER,
+} from '../../../source/vscode/auth-token';
 
 export type MessageHandler = (message: ServerMessage) => void;
 
@@ -36,7 +40,11 @@ export class WebSocketClient {
 				const url = `ws://127.0.0.1:${port}`;
 				this.outputChannel.appendLine(`Connecting to ${url}...`);
 
-				this.ws = new WebSocket(url);
+				// The CLI writes this token when it starts listening; until then
+				// the server answers 401 and the reconnect loop retries.
+				this.ws = new WebSocket(url, {
+					headers: {[VSCODE_TOKEN_HEADER]: readVSCodeToken(port) ?? ''},
+				});
 
 				this.ws.on('open', () => {
 					this.isConnecting = false;

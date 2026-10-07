@@ -202,6 +202,8 @@ Before the sidebar chat, the extension paired with a PDM Code session running in
 
 The sidebar chat and companion mode are separate conversations - the GUI does not see what a terminal session is doing.
 
+The companion socket only accepts the extension. On start the CLI writes a random per-run token to `<config dir>/vscode/<port>.token` (readable only by your user), and the extension presents it on connect. Any connection carrying an `Origin` header (that is, from a web page) is refused, so a site open in your browser can't drive the session. The CLI and the extension must therefore run as the same OS user with the same `PDM_CONFIG_DIR`.
+
 ## Troubleshooting
 
 **Sidebar chat won't connect?**
