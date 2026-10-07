@@ -2010,7 +2010,8 @@ test('SearchFileContentsFormatter hides context when 0', t => {
 	t.notRegex(output!, /Context:/);
 });
 
-test.serial(
+// Creating symlinks on Windows needs elevated rights or developer mode.
+(process.platform === 'win32' ? test.skip : test.serial)(
 	'search_file_contents does not follow symlinks out of the project',
 	async t => {
 		const root = mkdtempSync(join(tmpdir(), 'pdm-symlink-root-'));

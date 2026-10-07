@@ -54,10 +54,16 @@ test('expandVars replaces $VAR and ${VAR}', t => {
 	else process.env.NCT_FOO = prev;
 });
 
+// Windows has no /bin/sh; Git for Windows puts bash on PATH, which is also
+// what pickShell uses there.
+const TEST_SHELL = process.platform === 'win32' ? 'bash' : '/bin/sh';
+
 test('mergeEnv overlays configured vars onto process.env', t => {
 	const env = mergeEnv({CUSTOM_VAR: 'value'});
 	t.is(env.CUSTOM_VAR, 'value');
-	t.truthy(env.PATH);
+	// Windows spells it Path, and a plain object copy loses process.env's
+	// case-insensitive lookup.
+	t.truthy(env.PATH ?? env.Path);
 });
 
 test('resolveCwd handles missing paths by falling back to projectRoot', t => {
@@ -158,7 +164,7 @@ test('runScript: captures stdout', async t => {
 	const result = await runScript(`echo 'hello world'`, {
 		cwd: testDir,
 		env: process.env,
-		shell: '/bin/sh',
+		shell: TEST_SHELL,
 		timeoutMs: 5_000,
 	});
 	t.is(result, 'EXIT_CODE: 0\nhello world');
@@ -168,7 +174,7 @@ test('runScript: non-zero exit returns output with EXIT_CODE prefix', async t =>
 	const result = await runScript(`echo oops >&2; exit 3`, {
 		cwd: testDir,
 		env: process.env,
-		shell: '/bin/sh',
+		shell: TEST_SHELL,
 		timeoutMs: 5_000,
 	});
 	// Non-zero exits are normal for many CLIs (audit, grep --quiet, git diff
@@ -183,7 +189,7 @@ test('runScript: audit-style non-zero exit with stdout output', async t => {
 		{
 			cwd: testDir,
 			env: process.env,
-			shell: '/bin/sh',
+			shell: TEST_SHELL,
 			timeoutMs: 5_000,
 		},
 	);
@@ -194,7 +200,7 @@ test('runScript: zero exit returns stdout with EXIT_CODE prefix', async t => {
 	const result = await runScript(`echo hello`, {
 		cwd: testDir,
 		env: process.env,
-		shell: '/bin/sh',
+		shell: TEST_SHELL,
 		timeoutMs: 5_000,
 	});
 	// Matches execute_bash: EXIT_CODE: 0 is always included so the LLM can
@@ -207,7 +213,7 @@ test('runScript: timeout kills long-running script', async t => {
 		runScript(`sleep 5`, {
 			cwd: testDir,
 			env: process.env,
-			shell: '/bin/sh',
+			shell: TEST_SHELL,
 			timeoutMs: 100,
 		}),
 		{message: /timed out/},
@@ -246,7 +252,7 @@ posixTest('runScript: a script that ignores SIGTERM is killed on timeout', async
 		runScript(`trap '' TERM; sleep 30`, {
 			cwd: testDir,
 			env: process.env,
-			shell: '/bin/sh',
+			shell: TEST_SHELL,
 			timeoutMs: 200,
 		}),
 		{message: /timed out/},

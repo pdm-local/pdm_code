@@ -81,7 +81,13 @@ export class BashExecutor extends EventEmitter {
 					`${command}\n\n__nc_ec=$?\ncommand pwd -P > '${cwdCaptureFile}' 2>/dev/null\nexit $__nc_ec`;
 
 		const proc = isWindows
-			? spawn('cmd', ['/c', command], {cwd})
+			? // Verbatim, the way Node's own `shell: true` calls cmd.exe. Without
+				// it Node escapes the command's quotes as \" for the C runtime,
+				// which cmd.exe does not understand, so any quoted argument broke.
+				spawn('cmd.exe', ['/d', '/s', '/c', `"${command}"`], {
+					cwd,
+					windowsVerbatimArguments: true,
+				})
 			: // `detached` makes the child a process-group leader so cancel() can
 				// signal the whole tree (e.g. `pnpm test` -> node -> test runner),
 				// not just the `sh` wrapper. Without it a cancelled command's

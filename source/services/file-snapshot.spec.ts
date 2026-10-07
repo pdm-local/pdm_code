@@ -496,7 +496,8 @@ test.serial('FileSnapshotService refuses to restore outside the workspace', asyn
 	}
 });
 
-test.serial('FileSnapshotService refuses to restore through a symlink out of the workspace', async t => {
+// Creating symlinks on Windows needs elevated rights or developer mode.
+(process.platform === 'win32' ? test.skip : test.serial)('FileSnapshotService refuses to restore through a symlink out of the workspace', async t => {
 	const tempDir = await createTempDir();
 	const outside = await createTempDir();
 	try {

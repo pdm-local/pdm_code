@@ -48,6 +48,9 @@ function testPathGetter(
 		if (value === undefined) delete process.env[key];
 		else process.env[key] = value;
 	}
+	// os.homedir() reads USERPROFILE on Windows, not HOME, so a faked HOME
+	// only takes effect on a Windows runner when both agree.
+	if (env.HOME !== undefined) process.env.USERPROFILE = env.HOME;
 	t.is(getter(), expected);
 }
 

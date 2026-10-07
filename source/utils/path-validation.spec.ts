@@ -255,7 +255,10 @@ test.serial('security: rejects an in-project symlink whose target escapes', t =>
 	}
 });
 
-test.serial('security: rejects a dangling symlink to a missing outside file', t => {
+// Creating symlinks on Windows needs elevated rights or developer mode.
+(process.platform === 'win32' ? test.skip : test.serial)(
+	'security: rejects a dangling symlink to a missing outside file',
+	t => {
 	const base = mkdtempSync(join(tmpdir(), 'pathval-'));
 	try {
 		const project = join(base, 'project');
@@ -270,7 +273,8 @@ test.serial('security: rejects a dangling symlink to a missing outside file', t 
 	} finally {
 		rmSync(base, {recursive: true, force: true});
 	}
-});
+	},
+);
 
 test.serial('security: allows an in-project symlink that stays inside', t => {
 	const base = mkdtempSync(join(tmpdir(), 'pathval-'));

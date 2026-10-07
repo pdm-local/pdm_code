@@ -16,9 +16,14 @@ import * as path from 'path';
  * string literals. Nothing here is derived from a request, a config file or any
  * other outside input, which is what semgrep's path-traversal rule is looking
  * for - hence one suppression here rather than on every call site below.
+ *
+ * The separator follows `process.platform`, read at call time: identical to
+ * `path.join` on a real machine, and a faked platform in tests (a Linux
+ * candidate list built on a Windows runner) keeps its own separator.
  */
 // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal
-const joinLocal = (...segments: string[]): string => path.join(...segments);
+const joinLocal = (...segments: string[]): string =>
+	(process.platform === 'win32' ? path.win32 : path.posix).join(...segments);
 
 /** The executable name(s) to look for, depending on platform. */
 export function cliExecutableNames(): string[] {
