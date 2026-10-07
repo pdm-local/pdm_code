@@ -237,3 +237,19 @@ test('buildHandler honors env merging', async t => {
 	const result = await handler({});
 	t.is(result, 'EXIT_CODE: 0\nhello-env');
 });
+
+const posixTest = process.platform === 'win32' ? test.skip : test;
+
+posixTest('runScript: a script that ignores SIGTERM is killed on timeout', async t => {
+	const started = Date.now();
+	await t.throwsAsync(
+		runScript(`trap '' TERM; sleep 30`, {
+			cwd: testDir,
+			env: process.env,
+			shell: '/bin/sh',
+			timeoutMs: 200,
+		}),
+		{message: /timed out/},
+	);
+	t.true(Date.now() - started < 10_000, 'SIGKILL escalation ended it');
+});

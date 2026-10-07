@@ -86,7 +86,8 @@ function expandSubstitutions(
 	return body.replace(
 		/\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}/g,
 		(_match, name: string) => {
-			if (!(name in args)) return '';
+			// Own keys only: `in` also matches `constructor`, `toString`, etc.
+			if (!Object.hasOwn(args, name)) return '';
 			return renderValue(args[name]);
 		},
 	);

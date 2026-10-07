@@ -104,3 +104,7 @@ test('renderBody positive and inverted sections on the same var', t => {
 	t.is(renderBody(tpl, {id: '1', json: true}), "A '1'");
 	t.is(renderBody(tpl, {id: '1', json: false}), "B '1'");
 });
+
+test('renderBody: prototype names are not arguments', t => {
+	t.is(renderBody('echo {{ constructor }}{{ toString }}', {}), 'echo ');
+});

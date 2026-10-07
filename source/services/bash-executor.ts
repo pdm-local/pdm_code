@@ -39,6 +39,9 @@ interface ExecutionEntry {
 	cwdCaptureFile?: string;
 }
 
+// How long a cancelled command gets to handle SIGTERM before SIGKILL.
+const KILL_GRACE_MS = 2_000;
+
 export class BashExecutor extends EventEmitter {
 	private executions = new Map<string, ExecutionEntry>();
 
@@ -332,6 +335,16 @@ export class BashExecutor extends EventEmitter {
 				// Process already exited; nothing to terminate.
 			}
 		}
+
+		// A command that traps SIGTERM would otherwise outlive the timeout
+		// forever: it is detached, so not even exiting the CLI reaps it.
+		setTimeout(() => {
+			try {
+				process.kill(-pid, 'SIGKILL');
+			} catch {
+				// Group already gone.
+			}
+		}, KILL_GRACE_MS).unref();
 	}
 
 	getState(executionId: string): BashExecutionState | undefined {

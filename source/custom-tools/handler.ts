@@ -54,22 +54,41 @@ export function runScript(
 	options: RunOptions,
 ): Promise<string> {
 	return new Promise((resolvePromise, rejectPromise) => {
+		// Own process group on POSIX, so a timeout reaches whatever the script
+		// spawned: a surviving grandchild keeps the stdout pipe open and the
+		// run would never settle.
+		const groupKill = process.platform !== 'win32';
 		const child = spawn(options.shell, ['-c', script], {
 			cwd: options.cwd,
 			env: options.env,
 			stdio: ['ignore', 'pipe', 'pipe'],
+			detached: groupKill,
 		});
+		const kill = (signal: NodeJS.Signals) => {
+			try {
+				if (groupKill && child.pid !== undefined) {
+					process.kill(-child.pid, signal);
+				} else {
+					child.kill(signal);
+				}
+			} catch {
+				// Already gone.
+			}
+		};
 
 		let stdout = '';
 		let stderr = '';
 		let timedOut = false;
+		let closed = false;
 
 		const timer = setTimeout(() => {
 			timedOut = true;
-			child.kill('SIGTERM');
-			// Force-kill if the process refuses to exit within a grace window.
+			kill('SIGTERM');
+			// Force-kill if the group refuses to exit within a grace window.
+			// Keyed on `closed`, not `child.killed`: that turns true as soon as
+			// SIGTERM is *sent*, so the escalation never fired.
 			setTimeout(() => {
-				if (!child.killed) child.kill('SIGKILL');
+				if (!closed) kill('SIGKILL');
 			}, 1_000).unref();
 		}, options.timeoutMs);
 
@@ -86,6 +105,7 @@ export function runScript(
 		});
 
 		child.on('close', code => {
+			closed = true;
 			clearTimeout(timer);
 			if (timedOut) {
 				rejectPromise(
@@ -193,7 +213,11 @@ export function expandVars(value: string): string {
 function pickShell(configured: string | undefined): string {
 	if (configured === 'bash') return '/bin/bash';
 	if (configured === 'sh') return '/bin/sh';
-	if (process.platform === 'win32') return process.env.ComSpec || 'cmd.exe';
+	// Not cmd.exe: arguments are POSIX single-quoted (template.ts), which
+	// cmd.exe does not understand, so `&` or `|` in a model-supplied value
+	// would run as a command. Git for Windows puts bash on PATH; without it
+	// the spawn fails with a clear "failed to start" instead.
+	if (process.platform === 'win32') return 'bash';
 	if (existsSync('/bin/bash')) return '/bin/bash';
 	return '/bin/sh';
 }

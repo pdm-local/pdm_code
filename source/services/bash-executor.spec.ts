@@ -1,3 +1,6 @@
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'ava';
 import { BashExecutor } from './bash-executor';
 
@@ -520,4 +523,26 @@ posixProcessTest('cancel() on a detached process kills a spawned child (process-
 	t.throws(() => {
 		process.kill(childPid, 0);
 	}, undefined, 'process.kill(pid, 0) should throw because the child was killed by the process-group signal');
+});
+
+const posixTest = process.platform === 'win32' ? test.skip : test;
+
+posixTest.serial('timeout SIGKILLs a command that ignores SIGTERM', async t => {
+	const dir = mkdtempSync(join(tmpdir(), 'pdm-bash-kill-'));
+	const pidFile = join(dir, 'pid');
+	try {
+		const executor = createExecutor();
+		// The loop survives SIGTERM (trapped) even though each sleep dies.
+		const { promise } = executor.execute(
+			`trap '' TERM; echo $$ > ${pidFile}; while :; do sleep 0.1; done`,
+			{ timeoutMs: 300 },
+		);
+		await promise;
+		const pid = Number(readFileSync(pidFile, 'utf-8').trim());
+
+		await new Promise(resolve => setTimeout(resolve, 3_000));
+		t.throws(() => process.kill(pid, 0), undefined, 'process is gone');
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
 });
