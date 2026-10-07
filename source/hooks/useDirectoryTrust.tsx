@@ -1,6 +1,6 @@
 import path from 'path';
 import {useCallback, useState} from 'react';
-import {loadPreferences, savePreferences} from '@/config/preferences';
+import {addTrustedDirectory, isDirectoryTrusted} from '@/config/trust';
 import {formatError} from '@/utils/error-formatter';
 import {logError, logInfo} from '@/utils/message-queue';
 
@@ -22,13 +22,7 @@ function checkTrustSync(directory: string): {
 	error: string | null;
 } {
 	try {
-		const preferences = loadPreferences();
-		const trustedDirectories = preferences.trustedDirectories || [];
-		const normalizedDirectory = path.resolve(directory); // nosemgrep
-		const trusted = trustedDirectories.some(
-			trustedDir => path.resolve(trustedDir) === normalizedDirectory, // nosemgrep
-		);
-		return {trusted, error: null};
+		return {trusted: isDirectoryTrusted(directory), error: null};
 	} catch (err) {
 		const errorMessage = formatError(err);
 		logError(`${errorMessage}`);
@@ -62,22 +56,9 @@ export function useDirectoryTrust(
 		try {
 			setError(null);
 
-			const preferences = loadPreferences();
-			const trustedDirectories = preferences.trustedDirectories || [];
-
-			// Normalize the directory path before storing and checking
-			const normalizedDirectory = path.resolve(directory); // nosemgrep
-
-			// Only add if not already trusted (check using normalized paths)
-			if (
-				!trustedDirectories.some(
-					trustedDir => path.resolve(trustedDir) === normalizedDirectory, // nosemgrep
-				)
-			) {
-				trustedDirectories.push(normalizedDirectory);
-				preferences.trustedDirectories = trustedDirectories;
-				savePreferences(preferences);
-
+			if (!isDirectoryTrusted(directory)) {
+				addTrustedDirectory(directory);
+				const normalizedDirectory = path.resolve(directory); // nosemgrep
 				logInfo(`Directory added to trusted list: ${normalizedDirectory}`);
 			}
 

@@ -142,3 +142,32 @@ test.serial('logs starts the tail on a line boundary', async t => {
 		await rm(root, {recursive: true, force: true});
 	}
 });
+
+test.serial('start and install refuse an untrusted directory', async t => {
+	const root = await tempProject();
+	const configDir = await mkdtemp(join(tmpdir(), 'daemon-cli-config-'));
+	const previous = process.env.PDM_CONFIG_DIR;
+	process.env.PDM_CONFIG_DIR = configDir;
+	let launched = false;
+	try {
+		const started = await runDaemonCli('start', {
+			projectRoot: root,
+			launchDaemon: () => {
+				launched = true;
+				return null;
+			},
+		});
+		t.is(started.exitCode, 1);
+		t.regex(started.output, /not trusted/);
+		t.false(launched);
+
+		const installed = await runDaemonCli('install', {projectRoot: root});
+		t.is(installed.exitCode, 1);
+		t.regex(installed.output, /not trusted/);
+	} finally {
+		if (previous === undefined) delete process.env.PDM_CONFIG_DIR;
+		else process.env.PDM_CONFIG_DIR = previous;
+		await rm(root, {recursive: true, force: true});
+		await rm(configDir, {recursive: true, force: true});
+	}
+});

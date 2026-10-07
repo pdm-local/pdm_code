@@ -5,8 +5,9 @@ import {
 	type ArtifactManager,
 	artifactManager,
 } from '@/artifacts/artifact-manager';
-import {getAppConfig} from '@/config/index';
-import {loadPreferences, savePreferences} from '@/config/preferences';
+import {getAppConfig, loadProjectEnv, reloadAppConfig} from '@/config/index';
+import {loadPreferences} from '@/config/preferences';
+import {addTrustedDirectory, isDirectoryTrusted} from '@/config/trust';
 import {resolveTune} from '@/config/tune';
 import {
 	TOOL_APPROVAL_REQUIRED_KIND,
@@ -50,7 +51,8 @@ export interface RunPlainShellDeps {
 	runPlainConversation: typeof runPlainConversation;
 	getShutdownManager: typeof getShutdownManager;
 	loadPreferences: typeof loadPreferences;
-	savePreferences: typeof savePreferences;
+	isDirectoryTrusted: typeof isDirectoryTrusted;
+	addTrustedDirectory: typeof addTrustedDirectory;
 	artifacts: Pick<
 		ArtifactManager,
 		| 'cleanupStaleEphemeralSessions'
@@ -64,7 +66,8 @@ const defaultDeps: RunPlainShellDeps = {
 	runPlainConversation,
 	getShutdownManager,
 	loadPreferences,
-	savePreferences,
+	isDirectoryTrusted,
+	addTrustedDirectory,
 	artifacts: artifactManager,
 };
 
@@ -117,6 +120,8 @@ export async function runPlainShell(
 		await deps.getShutdownManager().gracefulShutdown(1);
 		return;
 	}
+
+	if (loadProjectEnv(true)) reloadAppConfig();
 
 	let init;
 	try {
@@ -319,16 +324,10 @@ function ensureDirectoryTrust(
 ): boolean {
 	if (trustDirectoryFlag) return true;
 	const cwd = path.resolve(process.cwd());
-	const preferences = deps.loadPreferences();
-	const trusted = (preferences.trustedDirectories ?? []).some(
-		dir => path.resolve(dir) === cwd,
-	);
-	if (trusted) return true;
+	if (deps.isDirectoryTrusted(cwd)) return true;
 
 	if (process.env.PDM_TRUST_DIRECTORY === '1') {
-		const updated = preferences.trustedDirectories ?? [];
-		updated.push(cwd);
-		deps.savePreferences({...preferences, trustedDirectories: updated});
+		deps.addTrustedDirectory(cwd);
 		writeStatus(`Marked ${cwd} as trusted (PDM_TRUST_DIRECTORY=1).`);
 		return true;
 	}

@@ -63,7 +63,9 @@ export default function SecurityDisclaimer({
 					<Text>
 						PDM Code may read, write, or execute files contained in this
 						directory. This can pose security risks, so only use files from
-						trusted sources.
+						trusted sources. Trusting it also runs any MCP servers, language
+						servers, and custom tools it configures (.mcp.json, .pdm/,
+						agents.config.json).
 					</Text>
 				</Box>
 				<StyledSelectInput items={items} onSelect={handleSelect} />

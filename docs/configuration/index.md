@@ -28,7 +28,7 @@ PDM Code looks for configuration in the following order (first found wins):
 
 ## Environment Variables
 
-Keep API keys out of version control using environment variables. Variables are loaded from shell environment (`.bashrc`, `.zshrc`) or `.env` file in your working directory.
+Keep API keys out of version control using environment variables. Variables are loaded from shell environment (`.bashrc`, `.zshrc`) or `.env` file in your working directory (loaded only once the directory is trusted).
 
 ### General
 
@@ -246,6 +246,8 @@ Set the initial development mode for all new interactive sessions. Without this 
 
 The `--mode` CLI flag always takes precedence over this config value. Non-interactive runs (`pdm run ...`) always default to `auto-accept` regardless of this setting.
 
+A project-level `agents.config.json` may only choose `normal` or `plan`. `auto-accept` and `yolo` are honoured from the user-level config only, so a cloned repository can't switch prompts off for you.
+
 ### Tool Auto-Approval
 
 Allow specific tools to run without confirmation, even in normal development mode. The `alwaysAllow` array accepts tool names, listed tools execute immediately without prompting for approval, and the same list also applies to non-interactive runs (`pdm run ...`).
@@ -257,6 +259,8 @@ Allow specific tools to run without confirmation, even in normal development mod
   }
 }
 ```
+
+`alwaysAllow` is read from the user-level config only (see [Configuration File Locations](#configuration-file-locations)). A project-level `agents.config.json` can't grant it.
 
 ### Disabling Tools
 
@@ -290,7 +294,7 @@ The simplest form replaces the entire built-in prompt with inline content:
 }
 ```
 
-Or load the prompt from a file (path is resolved relative to the working directory unless absolute):
+Or load the prompt from a file (path is resolved relative to the working directory unless absolute; a project-level config may only point inside the project):
 
 ```json
 {

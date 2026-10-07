@@ -43,6 +43,7 @@ interface ProbeOverrides {
 	cliModel?: string;
 	nonInteractiveMode?: boolean;
 	customCommandCache?: Map<string, CustomCommand>;
+	isTrusted?: boolean;
 }
 
 let captured: ReturnType<typeof useAppInitialization> | null = null;
@@ -73,6 +74,7 @@ function setup(overrides: ProbeOverrides = {}) {
 		cliProvider: overrides.cliProvider,
 		cliModel: overrides.cliModel,
 		nonInteractiveMode: overrides.nonInteractiveMode,
+		isTrusted: overrides.isTrusted ?? true,
 	};
 
 	function Probe() {
@@ -108,6 +110,14 @@ test('returns the expected handler surface', t => {
 	t.is(typeof handlers.initializeMCPServers, 'function');
 	t.is(typeof handlers.reinitializeMCPServers, 'function');
 	t.is(typeof handlers.initializeLSPServers, 'function');
+});
+
+test('an untrusted directory runs no initialization', async t => {
+	const {props} = setup({isTrusted: false});
+	await new Promise(resolve => setTimeout(resolve, 20));
+
+	t.deepEqual(props.setToolManager.calls, []);
+	t.deepEqual(props.setPreferencesLoaded.calls, []);
 });
 
 test('loadCustomCommands populates cache from loader and updates count', t => {

@@ -13,6 +13,7 @@
 
 import {createLLMClient} from '@/client-factory';
 import {getAppConfig} from '@/config/index';
+import {isDirectoryTrusted} from '@/config/trust';
 import {CheckpointManager} from '@/services/checkpoint-manager';
 import type {Checkpointer} from '@/skills/dispatcher';
 import {SubagentExecutor} from '@/subagents/subagent-executor';
@@ -22,6 +23,7 @@ import type {DevelopmentMode} from '@/types/core';
 import {formatError} from '@/utils/error-formatter';
 import {setNotificationsConfig} from '@/utils/notifications';
 import {getShutdownManager} from '@/utils/shutdown';
+import {untrustedDaemonMessage} from './cli';
 import {startDaemon} from './daemon';
 
 async function main(): Promise<void> {
@@ -39,6 +41,11 @@ async function main(): Promise<void> {
 		// but the rewrite costs nothing and silences the format-string warning.
 		const detail = formatError(err);
 		console.error(`Failed to chdir into ${projectRoot}: ${detail}`);
+		process.exit(1);
+	}
+
+	if (!isDirectoryTrusted(projectRoot)) {
+		console.error(untrustedDaemonMessage(projectRoot));
 		process.exit(1);
 	}
 

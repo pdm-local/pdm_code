@@ -414,6 +414,7 @@ export default function App({
 		cliModel,
 		nonInteractiveMode,
 		developmentModeRef: appState.developmentModeRef,
+		isTrusted: isEffectivelyTrusted,
 	});
 
 	// Setup mode handlers

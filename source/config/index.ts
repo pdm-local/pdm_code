@@ -1,6 +1,6 @@
 import {config as loadEnv} from 'dotenv';
 import {existsSync, mkdirSync, readFileSync, writeFileSync} from 'fs';
-import {join} from 'path';
+import {join, resolve} from 'path';
 import {type CliMode, VALID_MODES} from '@/app/types';
 import {substituteEnvVars} from '@/config/env-substitution';
 import {
@@ -13,6 +13,7 @@ import {
 	loadPreferences,
 } from '@/config/preferences';
 import {defaultTheme, getThemeColors} from '@/config/themes';
+import {isDirectoryTrusted} from '@/config/trust';
 import {
 	MAX_EMPTY_TURNS,
 	MAX_MALFORMED_RETRIES,
@@ -35,19 +36,30 @@ import type {
 } from '@/types/index';
 import {logError} from '@/utils/message-queue';
 import {DEFAULT_SINGLE_LINE_PASTE_THRESHOLD} from '@/utils/paste-utils';
+import {isPathInside, isRealPathInside} from '@/utils/path-validation';
 
-// Load .env file from working directory (shell environment takes precedence)
-// Suppress dotenv console output by temporarily redirecting stdout
-const envPath = join(process.cwd(), '.env');
-if (existsSync(envPath)) {
-	const originalWrite = process.stdout.write.bind(process.stdout);
-	process.stdout.write = () => true;
-	try {
-		loadEnv({path: envPath});
-	} finally {
-		process.stdout.write = originalWrite;
-	}
+let projectEnvLoaded = false;
+
+/**
+ * Load the working directory's .env (shell environment takes precedence).
+ * The file is repo-controlled and can set PDM_* switches, so it is only read
+ * once the directory is trusted: at import when trust already exists, or by
+ * the caller right after the user grants it. Returns true when it loaded
+ * something, so the caller knows to reload the app config.
+ */
+export function loadProjectEnv(
+	trusted = isDirectoryTrusted(process.cwd()),
+): boolean {
+	if (projectEnvLoaded || !trusted) return false;
+	const envPath = join(process.cwd(), '.env');
+	if (!existsSync(envPath)) return false;
+
+	projectEnvLoaded = true;
+	loadEnv({path: envPath, quiet: true});
+	return true;
 }
+
+loadProjectEnv();
 
 // Hold a map of what config files are where
 export const confDirMap: Record<string, string> = {};
@@ -161,6 +173,19 @@ function loadHierarchicalConfig<T>(
 		return projectResult;
 	}
 
+	return tryLoadConfig(join(getConfigPath(), fileName), label, extract); // nosemgrep
+}
+
+/**
+ * For settings that loosen tool approval. A cloned repo controls
+ * `<cwd>/agents.config.json`, so these come from the user-level config only.
+ */
+function loadUserConfig<T>(
+	fileName: string,
+	label: string,
+	// biome-ignore lint/suspicious/noExplicitAny: parsed JSON is dynamically shaped
+	extract: (config: any) => T | null,
+): T | null {
 	return tryLoadConfig(join(getConfigPath(), fileName), label, extract); // nosemgrep
 }
 
@@ -424,7 +449,7 @@ function loadPdmToolsConfig(): AppConfig['pdmTools'] {
 
 function loadAlwaysAllowConfig(): string[] | undefined {
 	return (
-		loadHierarchicalConfig('agents.config.json', 'alwaysAllow', config => {
+		loadUserConfig('agents.config.json', 'alwaysAllow', config => {
 			const alwaysAllow = config.pdm?.alwaysAllow;
 			if (Array.isArray(alwaysAllow)) {
 				return alwaysAllow.filter(
@@ -451,31 +476,61 @@ function loadDisabledToolsConfig(): string[] | undefined {
 }
 
 function loadSystemPromptConfig(): SystemPromptConfig | undefined {
-	return (
-		loadHierarchicalConfig('agents.config.json', 'systemPrompt', config => {
-			const systemPrompt = config.pdm?.systemPrompt;
-			if (!systemPrompt || typeof systemPrompt !== 'object') {
-				return null;
-			}
-
-			const result: SystemPromptConfig = {};
-			if (systemPrompt.mode === 'replace' || systemPrompt.mode === 'append') {
-				result.mode = systemPrompt.mode;
-			}
-			if (typeof systemPrompt.content === 'string') {
-				result.content = systemPrompt.content;
-			}
-			if (typeof systemPrompt.file === 'string') {
-				result.file = systemPrompt.file;
-			}
-
-			if (result.content === undefined && result.file === undefined) {
-				return null;
-			}
-
-			return result;
-		}) ?? undefined
+	const result = loadHierarchicalConfig(
+		'agents.config.json',
+		'systemPrompt',
+		parseSystemPrompt,
 	);
+	// A project config must not read files outside the project into the prompt
+	// (and from there to the provider), e.g. `~/.aws/credentials`. A missing
+	// file can't be read, so the lexical check is enough for it.
+	const isInsideProject = (file: string) => {
+		const target = resolve(process.cwd(), file); // nosemgrep
+		return existsSync(target)
+			? isRealPathInside(target, process.cwd())
+			: isPathInside(target, process.cwd());
+	};
+	if (
+		result?.file !== undefined &&
+		tryLoadConfig(
+			join(process.cwd(), 'agents.config.json'), // nosemgrep
+			'systemPrompt',
+			parseSystemPrompt,
+		) !== null &&
+		!isInsideProject(result.file)
+	) {
+		logError(
+			`Ignoring project systemPrompt.file outside the project: ${result.file}`,
+		);
+		delete result.file;
+		if (result.content === undefined) return undefined;
+	}
+	return result ?? undefined;
+}
+
+// biome-ignore lint/suspicious/noExplicitAny: parsed JSON is dynamically shaped
+function parseSystemPrompt(config: any): SystemPromptConfig | null {
+	const systemPrompt = config.pdm?.systemPrompt;
+	if (!systemPrompt || typeof systemPrompt !== 'object') {
+		return null;
+	}
+
+	const result: SystemPromptConfig = {};
+	if (systemPrompt.mode === 'replace' || systemPrompt.mode === 'append') {
+		result.mode = systemPrompt.mode;
+	}
+	if (typeof systemPrompt.content === 'string') {
+		result.content = systemPrompt.content;
+	}
+	if (typeof systemPrompt.file === 'string') {
+		result.file = systemPrompt.file;
+	}
+
+	if (result.content === undefined && result.file === undefined) {
+		return null;
+	}
+
+	return result;
 }
 
 function loadModeProvidersConfig(
@@ -554,18 +609,32 @@ function loadNotificationsConfig(): NotificationsConfig | undefined {
 	return getNotificationsPreference();
 }
 
+function parseDefaultMode(config: {pdm?: {defaultMode?: unknown}}) {
+	const defaultMode = config.pdm?.defaultMode;
+	if (typeof defaultMode === 'string') {
+		const normalized = defaultMode.toLowerCase().trim();
+		if ((VALID_MODES as readonly string[]).includes(normalized)) {
+			return normalized as CliMode;
+		}
+	}
+	return null;
+}
+
+// Modes a project config may pick on its own: neither skips a prompt.
+const PROJECT_SAFE_MODES: readonly CliMode[] = ['normal', 'plan'];
+
 export function loadDefaultMode(): CliMode | undefined {
+	const projectMode = tryLoadConfig(
+		join(process.cwd(), 'agents.config.json'), // nosemgrep
+		'defaultMode',
+		parseDefaultMode,
+	);
+	if (projectMode && PROJECT_SAFE_MODES.includes(projectMode)) {
+		return projectMode;
+	}
 	return (
-		loadHierarchicalConfig('agents.config.json', 'defaultMode', config => {
-			const defaultMode = config.pdm?.defaultMode;
-			if (typeof defaultMode === 'string') {
-				const normalized = defaultMode.toLowerCase().trim();
-				if ((VALID_MODES as readonly string[]).includes(normalized)) {
-					return normalized as CliMode;
-				}
-			}
-			return null;
-		}) ?? undefined
+		loadUserConfig('agents.config.json', 'defaultMode', parseDefaultMode) ??
+		undefined
 	);
 }
 

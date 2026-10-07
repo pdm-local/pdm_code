@@ -10,7 +10,7 @@ import {
 	InfoMessage,
 	WarningMessage,
 } from '@/components/message-box';
-import {getAppConfig, reloadAppConfig} from '@/config/index';
+import {getAppConfig, loadProjectEnv, reloadAppConfig} from '@/config/index';
 import {formatConfigLintIssue, lintProviderConfigs} from '@/config/lint';
 import {loadAllProviderConfigs} from '@/config/mcp-config-loader';
 import {
@@ -81,6 +81,13 @@ interface UseAppInitializationProps {
 	 * resolve under `pdm run`.
 	 */
 	nonInteractiveMode?: boolean;
+	/**
+	 * Whether the working directory is trusted. Initialization loads project
+	 * config, skills, `.mcp.json` servers, and LSP binaries, all of which a
+	 * cloned repo controls, so none of it may run while the trust prompt is
+	 * still on screen.
+	 */
+	isTrusted: boolean;
 }
 
 export function useAppInitialization({
@@ -105,6 +112,7 @@ export function useAppInitialization({
 	cliProvider,
 	cliModel,
 	nonInteractiveMode = false,
+	isTrusted,
 	developmentModeRef,
 }: UseAppInitializationProps) {
 	// Initialize LLM client and model
@@ -551,9 +559,13 @@ export function useAppInitialization({
 		}
 	};
 
-	// biome-ignore lint/correctness/useExhaustiveDependencies: Initialization effect should only run once on mount
+	// biome-ignore lint/correctness/useExhaustiveDependencies: Initialization effect should only run once, as soon as the directory is trusted
 	useEffect(() => {
+		if (!isTrusted) return;
+
 		const initializeApp = async () => {
+			if (loadProjectEnv(true)) reloadAppConfig();
+
 			setClient(null);
 			setCurrentModel('');
 			setCurrentProviderConfig(null);
@@ -626,7 +638,7 @@ export function useAppInitialization({
 		};
 
 		void initializeApp();
-	}, []);
+	}, [isTrusted]);
 
 	return {
 		initializeClient,

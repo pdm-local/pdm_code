@@ -21,6 +21,7 @@ import {
 } from 'node:fs';
 import {dirname, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {isDirectoryTrusted} from '@/config/trust';
 import {formatError} from '@/utils/error-formatter';
 import {
 	getLockfilePath,
@@ -28,6 +29,12 @@ import {
 	readLockfile,
 	removeLockfile,
 } from './lockfile';
+
+// The daemon runs project skills headless, where bash never prompts, so it
+// only serves a directory the user has already trusted interactively.
+export function untrustedDaemonMessage(projectRoot: string): string {
+	return `${projectRoot} is not trusted. Run pdm there once and accept the trust prompt before starting the daemon.`;
+}
 
 function getLogPath(projectRoot: string): string {
 	return join(projectRoot, '.pdm', 'daemon.log');
@@ -106,6 +113,9 @@ export async function runDaemonCli(
 async function installCommand(
 	opts: DaemonCliOptions,
 ): Promise<DaemonCliResult> {
+	if (!isDirectoryTrusted(opts.projectRoot)) {
+		return {exitCode: 1, output: untrustedDaemonMessage(opts.projectRoot)};
+	}
 	const {installAutoStart} = await import('./install');
 	const result = await installAutoStart({projectRoot: opts.projectRoot});
 	return {
@@ -123,6 +133,9 @@ async function uninstallCommand(
 }
 
 async function start(opts: DaemonCliOptions): Promise<DaemonCliResult> {
+	if (!isDirectoryTrusted(opts.projectRoot)) {
+		return {exitCode: 1, output: untrustedDaemonMessage(opts.projectRoot)};
+	}
 	const live = await readLiveLockfile(opts.projectRoot);
 	if (live) {
 		return {

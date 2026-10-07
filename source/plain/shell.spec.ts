@@ -94,8 +94,9 @@ function baseDeps(
 	overrides: Partial<RunPlainShellDeps> = {},
 ): Partial<RunPlainShellDeps> {
 	return {
-		loadPreferences: () => ({ trustedDirectories: [] }) as never,
-		savePreferences: () => undefined,
+		loadPreferences: () => ({}) as never,
+		isDirectoryTrusted: () => false,
+		addTrustedDirectory: () => undefined,
 		artifacts: {
 			cleanupStaleEphemeralSessions: async () => undefined,
 			markEphemeralSession: async () => undefined,
@@ -470,7 +471,7 @@ test.serial(
 				trustDirectory: false,
 				outputFormat: "json",
 				deps: baseDeps({
-					loadPreferences: () => ({ trustedDirectories: [] }) as never,
+					isDirectoryTrusted: () => false,
 					initializePlain: async () => {
 						initCalled = true;
 						return makeFakeInitializePlain()();
@@ -508,7 +509,7 @@ test.serial(
 				trustDirectory: false,
 				outputFormat: "json",
 				deps: baseDeps({
-					loadPreferences: () => ({ trustedDirectories: [cwd] }) as never,
+					isDirectoryTrusted: (dir) => dir === cwd,
 					initializePlain: makeFakeInitializePlain(),
 					runPlainConversation: makeFakeRunPlainConversation({
 						kind: "success",
@@ -530,11 +531,11 @@ test.serial(
 );
 
 test.serial(
-	"PDM_TRUST_DIRECTORY=1 trusts the cwd and persists it via savePreferences",
+	"PDM_TRUST_DIRECTORY=1 trusts the cwd and persists it via addTrustedDirectory",
 	async (t) => {
 		const shutdown: CapturedShutdown = { code: null };
 		const stdout = capturingStdout();
-		let savedWith: { trustedDirectories?: string[] } | null = null;
+		let added: string | null = null;
 		process.env.PDM_TRUST_DIRECTORY = "1";
 		try {
 			await runPlainShell({
@@ -543,9 +544,8 @@ test.serial(
 				trustDirectory: false,
 				outputFormat: "json",
 				deps: baseDeps({
-					loadPreferences: () => ({ trustedDirectories: [] }) as never,
-					savePreferences: (prefs) => {
-						savedWith = prefs as { trustedDirectories?: string[] };
+					addTrustedDirectory: (dir) => {
+						added = dir;
 					},
 					initializePlain: makeFakeInitializePlain(),
 					runPlainConversation: makeFakeRunPlainConversation({
@@ -565,12 +565,7 @@ test.serial(
 		const report = JSON.parse(stdout.get());
 		t.is(report.kind, "success");
 		t.is(shutdown.code, 0);
-		t.truthy(savedWith);
-		t.true(
-			(savedWith?.trustedDirectories ?? []).some(
-				(dir) => dir === process.cwd(),
-			),
-		);
+		t.is(added, process.cwd());
 	},
 );
 
@@ -735,7 +730,7 @@ test.serial(
 				trustDirectory: false,
 				outputFormat: "text",
 				deps: baseDeps({
-					loadPreferences: () => ({ trustedDirectories: [] }) as never,
+					isDirectoryTrusted: () => false,
 					initializePlain: async () => {
 						initCalled = true;
 						return makeFakeInitializePlain()();

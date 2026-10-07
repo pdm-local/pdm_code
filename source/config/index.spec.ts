@@ -196,9 +196,15 @@ test.serial('loadDefaultMode returns undefined when no config exists', async t =
 	}
 });
 
-for (const mode of ['normal', 'auto-accept', 'yolo', 'plan']) {
+for (const [mode, expected] of [
+	['normal', 'normal'],
+	['plan', 'plan'],
+	// A cloned repo must not be able to switch prompts off.
+	['auto-accept', undefined],
+	['yolo', undefined],
+] as const) {
 	test.serial(
-		`loadDefaultMode accepts valid mode '${mode}' from project config`,
+		`loadDefaultMode from project config: '${mode}' -> ${expected}`,
 		async t => {
 			const originalCwd = process.cwd();
 			const originalEnv = process.env.PDM_CONFIG_DIR;
@@ -215,7 +221,7 @@ for (const mode of ['normal', 'auto-accept', 'yolo', 'plan']) {
 				process.env.PDM_CONFIG_DIR = join(testSubdir, 'nonexistent-global');
 
 				const {loadDefaultMode: fn} = await import('./index.js');
-				t.is(fn(), mode, `Should return '${mode}' from project config`);
+				t.is(fn(), expected);
 			} finally {
 				process.chdir(originalCwd);
 				if (originalEnv !== undefined) {
@@ -228,7 +234,7 @@ for (const mode of ['normal', 'auto-accept', 'yolo', 'plan']) {
 	);
 }
 
-test.serial('loadDefaultMode prefers project config over global config', async t => {
+test.serial('loadDefaultMode ignores an escalating project mode and uses global', async t => {
 	const originalCwd = process.cwd();
 	const originalEnv = process.env.PDM_CONFIG_DIR;
 	const projectDir = join(defaultModeTestDir, 'project-prefer');
@@ -251,7 +257,7 @@ test.serial('loadDefaultMode prefers project config over global config', async t
 		process.env.PDM_CONFIG_DIR = globalDir;
 
 		const {loadDefaultMode: fn} = await import('./index.js');
-		t.is(fn(), 'yolo', 'Project config should take precedence over global');
+		t.is(fn(), 'plan', 'Project yolo must not override the global setting');
 	} finally {
 		process.chdir(originalCwd);
 		if (originalEnv !== undefined) {
@@ -300,14 +306,14 @@ test.serial('loadDefaultMode normalizes case-insensitive values', async t => {
 	try {
 		writeFileSync(
 			join(testSubdir, 'agents.config.json'),
-			JSON.stringify({pdm: {defaultMode: 'Yolo'}}),
+			JSON.stringify({pdm: {defaultMode: 'Plan'}}),
 			'utf-8',
 		);
 		process.chdir(testSubdir);
 		process.env.PDM_CONFIG_DIR = join(testSubdir, 'nonexistent-global');
 
 		const {loadDefaultMode: fn} = await import('./index.js');
-		t.is(fn(), 'yolo', 'Should normalize uppercase values to lowercase');
+		t.is(fn(), 'plan', 'Should normalize uppercase values to lowercase');
 	} finally {
 		process.chdir(originalCwd);
 		if (originalEnv !== undefined) {
@@ -402,6 +408,58 @@ test.serial('loadSystemPromptConfig loads file path', async t => {
 			t.deepEqual(systemPrompt, {mode: 'append', file: './prompt.md'});
 		},
 	);
+});
+
+test.serial('loadSystemPromptConfig drops a project file outside the project', async t => {
+	await withSystemPromptConfig(
+		'system-prompt-outside',
+		{
+			pdm: {
+				systemPrompt: {mode: 'replace', file: '/etc/hostname'},
+			},
+		},
+		systemPrompt => {
+			t.is(systemPrompt, undefined);
+		},
+	);
+});
+
+test.serial('project alwaysAllow is ignored, user-level alwaysAllow applies', async t => {
+	const originalCwd = process.cwd();
+	const originalEnv = process.env.PDM_CONFIG_DIR;
+	const projectDir = join(systemPromptTestDir, 'always-allow-project');
+	const globalDir = join(systemPromptTestDir, 'always-allow-global');
+	mkdirSync(projectDir, {recursive: true});
+	mkdirSync(globalDir, {recursive: true});
+
+	try {
+		writeFileSync(
+			join(projectDir, 'agents.config.json'),
+			JSON.stringify({pdm: {alwaysAllow: ['execute_bash']}}),
+			'utf-8',
+		);
+		process.chdir(projectDir);
+		process.env.PDM_CONFIG_DIR = globalDir;
+
+		const {reloadAppConfig: reload, getAppConfig} = await import('./index.js');
+		reload();
+		t.is(getAppConfig().alwaysAllow, undefined);
+
+		writeFileSync(
+			join(globalDir, 'agents.config.json'),
+			JSON.stringify({pdm: {alwaysAllow: ['read_file']}}),
+			'utf-8',
+		);
+		reload();
+		t.deepEqual(getAppConfig().alwaysAllow, ['read_file']);
+	} finally {
+		process.chdir(originalCwd);
+		if (originalEnv !== undefined) {
+			process.env.PDM_CONFIG_DIR = originalEnv;
+		} else {
+			delete process.env.PDM_CONFIG_DIR;
+		}
+	}
 });
 
 test.serial('loadSystemPromptConfig ignores invalid mode value', async t => {
