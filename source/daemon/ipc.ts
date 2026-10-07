@@ -12,7 +12,7 @@
  * See `agents/2026-05-20-skills-unification-plan.md` step 19.
  */
 
-import {existsSync, unlinkSync} from 'node:fs';
+import {chmodSync, existsSync, lstatSync, unlinkSync} from 'node:fs';
 import {
 	createConnection,
 	createServer,
@@ -71,6 +71,10 @@ export class DaemonIpcServer {
 			this.server?.once('error', reject);
 			this.server?.listen(this.socketPath, () => resolve());
 		});
+		// Connecting to an AF_UNIX socket needs write permission on it, so
+		// owner-only keeps other local users from driving or stopping the
+		// daemon. Named pipes on Windows have no file mode.
+		if (process.platform !== 'win32') chmodSync(this.socketPath, 0o600);
 	}
 
 	async stop(): Promise<void> {
@@ -198,6 +202,16 @@ export class DaemonIpcClient {
 
 	async connect(): Promise<void> {
 		if (this.socket) return;
+		// The long-path fallback lives under /tmp, where another user could
+		// pre-create the socket and answer in the daemon's place.
+		if (process.platform !== 'win32' && process.getuid) {
+			const owner = lstatSync(this.socketPath).uid;
+			if (owner !== process.getuid()) {
+				throw new Error(
+					`Refusing daemon socket ${this.socketPath}: owned by uid ${owner}, not you`,
+				);
+			}
+		}
 		await new Promise<void>((resolve, reject) => {
 			const s = createConnection(this.socketPath);
 			s.setEncoding('utf-8');

@@ -167,10 +167,10 @@ test('AcpAgent.newSession - returns unique session IDs', async t => {
 	t.not(s1.sessionId, s2.sessionId);
 });
 
-test('AcpAgent.newSession - returns auto-accept as current mode', async t => {
+test('AcpAgent.newSession - starts in normal mode', async t => {
 	const {agent} = createAgent();
 	const result = await agent.newSession({cwd: '/tmp'});
-	t.is(result.modes.currentModeId, 'auto-accept');
+	t.is(result.modes.currentModeId, 'normal');
 });
 
 test('AcpAgent.newSession - returns all available modes', async t => {

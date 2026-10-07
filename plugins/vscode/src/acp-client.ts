@@ -184,7 +184,7 @@ export class PdmCodeAcpClient {
 		try {
 			// Get VS Code settings for initial preferences
 			const config = vscode.workspace.getConfiguration('pdm');
-			const initialMode = config.get<string>('mode') || 'auto-accept';
+			const initialMode = config.get<string>('mode') || 'normal';
 			const initialModel = config.get<string>('model');
 
 			const result = await this.connection.newSession({ cwd, mcpServers: [] });

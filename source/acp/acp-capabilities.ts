@@ -49,7 +49,8 @@ export function negotiateProtocolVersion(
 export function acpModeToDevelopmentMode(
 	modeId: SessionModeId,
 ): DevelopmentMode {
-	return MODE_MAP[modeId] ?? 'auto-accept';
+	// Fail safe: a mode we don't recognise asks before acting.
+	return MODE_MAP[modeId] ?? 'normal';
 }
 
 export function developmentModeToAcpMode(mode: DevelopmentMode): SessionModeId {

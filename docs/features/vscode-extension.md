@@ -158,7 +158,7 @@ The extension can be configured in VS Code settings (`Cmd+,` / `Ctrl+,`):
 | --------------------------- | ------------- | -------------------------------------------------------------------- |
 | `pdm.cliPath`         | (empty)       | Absolute path to the pdm CLI. If empty, uses the global install |
 | `pdm.cwd`             | (empty)       | Working directory for the CLI. Defaults to the workspace root         |
-| `pdm.mode`            | `auto-accept` | Operating mode for the assistant                                      |
+| `pdm.mode`            | `normal`      | Operating mode for the assistant (user/machine setting only)          |
 | `pdm.model`           | (empty)       | Model for PDM Code sessions (set via the model dropdown)             |
 | `pdm.showDiffPreview` | `true`        | Show diff preview before applying file changes                        |
 | `pdm.codeLens`        | `true`        | Show `Explain Code` / `Generate Tests` lenses above symbols            |

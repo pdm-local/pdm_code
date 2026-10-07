@@ -24,6 +24,12 @@
 		"ollama",
 		"local"
 	],
+	"capabilities": {
+		"untrustedWorkspaces": {
+			"supported": false,
+			"description": "PDM Code runs an agent that reads, writes and executes files in the workspace, and starts the MCP servers and tools it configures."
+		}
+	},
 	"activationEvents": [
 		"onStartupFinished"
 	],
@@ -171,8 +177,8 @@
 				},
 				"pdm.mode": {
 					"type": "string",
-					"default": "auto-accept",
-					"scope": "resource",
+					"default": "normal",
+					"scope": "machine",
 					"description": "The current operating mode for the PDM Code assistant (e.g. chat, auto-accept)"
 				},
 				"pdm.model": {

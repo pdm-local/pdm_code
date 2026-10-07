@@ -688,7 +688,9 @@ export class AcpAgent implements Agent {
 			cwd,
 			conn: this.conn,
 			clientCapabilities: this.clientCapabilities,
-			initialMode: 'auto-accept',
+			// Ask before acting until the client picks a mode: an editor opening a
+			// cloned repo should not start out writing files unprompted.
+			initialMode: 'normal',
 		});
 		this.sessions.set(sessionId, session);
 		this.buildSystemPromptForSession(session);

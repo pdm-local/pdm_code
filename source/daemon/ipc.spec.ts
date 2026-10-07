@@ -1,4 +1,5 @@
 import {createConnection} from 'node:net';
+import {statSync} from 'node:fs';
 import {mkdir, mkdtemp, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {dirname, join} from 'node:path';
@@ -266,3 +267,16 @@ test.serial(
 		}
 	},
 );
+
+const posixTest = process.platform === 'win32' ? test.skip : test;
+
+posixTest.serial('the socket is owner-only', async t => {
+	const path = await makeSocketPath();
+	const server = new DaemonIpcServer(path, {listSubscriptions: () => []});
+	await server.start();
+	try {
+		t.is(statSync(path).mode & 0o777, 0o600);
+	} finally {
+		await server.stop();
+	}
+});

@@ -55,8 +55,8 @@ test('acpModeToDevelopmentMode - maps plan', t => {
 	t.is(acpModeToDevelopmentMode('plan'), 'plan');
 });
 
-test('acpModeToDevelopmentMode - falls back to auto-accept for unknown mode', t => {
-	t.is(acpModeToDevelopmentMode('unknown' as any), 'auto-accept');
+test('acpModeToDevelopmentMode - falls back to normal for unknown mode', t => {
+	t.is(acpModeToDevelopmentMode('unknown' as any), 'normal');
 });
 
 // ============================================================================
