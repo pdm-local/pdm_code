@@ -95,7 +95,9 @@ function writeConfigObject(
 function atomicWriteFileSync(filePath: string, data: string): void {
 	const tmpPath = `${filePath}.${randomUUID()}.tmp`;
 	try {
-		writeFileSync(tmpPath, data, 'utf-8');
+		// Configs hold provider API keys: owner-only. The rename carries the
+		// mode over, so an existing 0644 file is tightened on its next write.
+		writeFileSync(tmpPath, data, {encoding: 'utf-8', mode: 0o600});
 		renameSync(tmpPath, filePath);
 	} catch (error) {
 		try {

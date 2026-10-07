@@ -64,11 +64,12 @@ export class PromptHistory {
 		this.savePromise = this.savePromise.then(async () => {
 			try {
 				const jsonContent = JSON.stringify(this.history, null, 2);
-				await fs.writeFile(
-					this.historyFile,
-					JSON_FORMAT_MARKER + jsonContent,
-					'utf8',
-				);
+				// Every prompt the user has typed: owner-only.
+				await fs.writeFile(this.historyFile, JSON_FORMAT_MARKER + jsonContent, {
+					encoding: 'utf8',
+					mode: 0o600,
+				});
+				await fs.chmod(this.historyFile, 0o600);
 			} catch (error) {
 				// Silently fail to avoid disrupting the user experience
 				const errorMessage = formatError(error);

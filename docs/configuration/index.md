@@ -37,6 +37,7 @@ Keep API keys out of version control using environment variables. Variables are 
 | `PDM_CONFIG_DIR` | Override the global configuration directory (skips all other config lookups) |
 | `PDM_CONTEXT_LIMIT` | Default context limit (tokens) used when no session override or provider context config applies and the model is not resolved from models.dev. Enables auto-compact and `/usage` to work correctly. Can also be set via the `--context-max` CLI flag (which takes priority) |
 | `PDM_DATA_DIR` | Override the application data directory for internal data like usage statistics |
+| `PDM_OFFLINE` | `1` or `true` stops the automatic [models.dev](https://models.dev) download (model context sizes and pricing), the only request PDM Code makes on its own to a third party. A cached copy is still used if one exists; without it, set `PDM_CONTEXT_LIMIT` and cost estimates are omitted |
 | `PDM_INSTALL_METHOD` | Override installation detection (`npm`, `homebrew`, `nix`, `unknown`) |
 | `PDM_DEFAULT_SHUTDOWN_TIMEOUT` | Graceful shutdown timeout in milliseconds (default: 5000) |
 | `PDM_MAX_TURNS` | Maximum LLM turns for headless runs (`--plain` and ACP). Overrides `pdm.headless.maxTurns`; default 200. See [Headless](#headless) |

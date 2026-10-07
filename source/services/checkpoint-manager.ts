@@ -36,7 +36,14 @@ export class CheckpointManager {
 	 */
 	private async ensureCheckpointsDir(): Promise<void> {
 		if (!existsSync(this.checkpointsDir)) {
-			await fs.mkdir(this.checkpointsDir, {recursive: true});
+			await fs.mkdir(this.checkpointsDir, {recursive: true, mode: 0o700});
+		}
+		// Checkpoints hold the full conversation inside the project tree. A
+		// self-contained ignore file keeps them out of commits without touching
+		// the project's own .gitignore.
+		const ignorePath = path.join(this.checkpointsDir, '.gitignore'); // nosemgrep
+		if (!existsSync(ignorePath)) {
+			await fs.writeFile(ignorePath, '*\n', 'utf-8');
 		}
 	}
 
@@ -158,7 +165,7 @@ export class CheckpointManager {
 		await fs.writeFile(
 			path.join(checkpointDir, 'conversation.json'), // nosemgrep
 			JSON.stringify(conversation, null, 2),
-			'utf-8',
+			{encoding: 'utf-8', mode: 0o600},
 		);
 
 		// nosemgrep

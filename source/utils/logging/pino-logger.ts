@@ -76,6 +76,7 @@ function createEnvironmentLogger(
 			dest: logFilePath,
 			sync: false, // Async writes for performance
 			mkdir: true,
+			mode: 0o600, // provider errors can echo request details
 		});
 
 		const pinoLogger = pino(baseConfig, destination);

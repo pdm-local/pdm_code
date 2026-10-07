@@ -502,25 +502,17 @@ export async function createProvider(
 		};
 	}
 
-	// Add OpenRouter-specific headers for app attribution
-	const headers: Record<string, string> = config.headers ?? {};
-	if (isOpenRouterProvider(providerConfig.name)) {
-		headers['HTTP-Referer'] = 'https://github.com/pdm-local/pdm_code';
-		headers['X-Title'] = 'PDM Code';
-	}
-
-	// Requesty (https://requesty.ai) is an OpenAI-compatible router and uses
-	// the same app-attribution headers as OpenRouter.
-	if (isRequestyProvider(providerConfig.name)) {
-		headers['HTTP-Referer'] = 'https://github.com/pdm-local/pdm_code';
-		headers['X-Title'] = 'PDM Code';
-	}
-
-	// OrcaRouter (https://www.orcarouter.ai) is an OpenAI-compatible router and
-	// uses the same app-attribution headers as OpenRouter.
-	if (isOrcaRouterProvider(providerConfig.name)) {
-		headers['HTTP-Referer'] = 'https://github.com/pdm-local/pdm_code';
-		headers['X-Title'] = 'PDM Code';
+	// App-attribution headers for OpenRouter-style routers (OpenRouter,
+	// Requesty, OrcaRouter). They name the app, not the user. Headers the
+	// user configured win, and the config object itself is never mutated.
+	const headers: Record<string, string> = {...config.headers};
+	if (
+		isOpenRouterProvider(providerConfig.name) ||
+		isRequestyProvider(providerConfig.name) ||
+		isOrcaRouterProvider(providerConfig.name)
+	) {
+		headers['HTTP-Referer'] ??= 'https://github.com/pdm-local/pdm_code';
+		headers['X-Title'] ??= 'PDM Code';
 	}
 
 	const {createOpenAICompatible} = await import('@ai-sdk/openai-compatible');

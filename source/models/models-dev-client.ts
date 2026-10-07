@@ -233,6 +233,11 @@ async function fetchModelsData(): Promise<ModelsDevDatabase | null> {
  */
 let modelsDataMemo: Promise<ModelsDevDatabase | null> | null = null;
 
+function isOfflineMode(): boolean {
+	const value = process.env.PDM_OFFLINE?.toLowerCase();
+	return value === '1' || value === 'true';
+}
+
 /**
  * Get models data, preferring cache if valid
  */
@@ -244,6 +249,10 @@ function getModelsData(): Promise<ModelsDevDatabase | null> {
 			if (cached) {
 				return cached.data;
 			}
+
+			// The one request PDM Code makes on its own to a third party; an
+			// offline session runs on whatever cache it has, or without one.
+			if (isOfflineMode()) return null;
 
 			// Fetch fresh data if cache is invalid
 			return fetchModelsData();
